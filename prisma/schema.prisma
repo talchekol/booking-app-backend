@@ -1,0 +1,100 @@
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// 1. משתמשים (לקוחות ובעלי עסקים)
+model User {
+  id           String        @id @default(uuid())
+  firstName    String?
+  lastName     String?
+  phone        String        @unique
+  isVerified   Boolean       @default(false)
+  role         Role          @default(CLIENT)
+  createdAt    DateTime      @default(now())
+  
+  appointments Appointment[]
+  businesses   Business[]
+}
+
+enum Role {
+  CLIENT
+  ADMIN
+}
+
+// 2. קודי אימות זמניים ל-SMS
+model VerificationCode {
+  id        String   @id @default(uuid())
+  phone     String
+  code      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+// 3. עסקים (מספרה / קליניקה / מכון)
+model Business {
+  id           String        @id @default(uuid())
+  name         String
+  address      String?
+  ownerId      String
+  owner        User          @relation(fields: [ownerId], references: [id])
+  
+  providers    Provider[]
+  services     Service[]
+  appointments Appointment[]
+  createdAt    DateTime      @default(now())
+}
+
+// 4. מעניקי השירות / אנשי צוות (ספר, מעצבת, מאמן)
+model Provider {
+  id           String        @id @default(uuid())
+  name         String
+  businessId   String
+  business     Business      @relation(fields: [businessId], references: [id])
+  
+  appointments Appointment[]
+}
+
+// 5. שירותים ומחירים
+model Service {
+  id          String        @id @default(uuid())
+  name        String
+  price       Float
+  durationMin Int           // משך זמן בדקות
+  businessId  String
+  business    Business      @relation(fields: [businessId], references: [id])
+  
+  appointments Appointment[]
+}
+
+// 6. התורים עצמם
+model Appointment {
+  id          String            @id @default(uuid())
+  dateTime    DateTime
+  status      AppointmentStatus @default(PENDING)
+  
+  userId      String
+  user        User              @relation(fields: [userId], references: [id])
+  
+  businessId  String
+  business    Business          @relation(fields: [businessId], references: [id])
+  
+  providerId  String
+  provider    Provider          @relation(fields: [providerId], references: [id])
+  
+  serviceId   String
+  service     Service           @relation(fields: [serviceId], references: [id])
+  
+  createdAt   DateTime          @default(now())
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
