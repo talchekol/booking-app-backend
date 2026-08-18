@@ -1,6 +1,31 @@
 const prisma = require("../config/prisma");
 const jwt = require("jsonwebtoken");
 
+// הגבלת ניסיונות אימות קוד (למניעת brute-force) - נשמר בזיכרון בלבד
+// מפתח: מספר טלפון, ערך: { count, windowStart }
+const verifyAttempts = new Map();
+const MAX_VERIFY_ATTEMPTS = 5;
+const ATTEMPTS_WINDOW_MS = 5 * 60 * 1000; // 5 דקות, תואם לתוקף הקוד
+
+const isRateLimited = (phone) => {
+  const entry = verifyAttempts.get(phone);
+  if (!entry) return false;
+  if (Date.now() - entry.windowStart > ATTEMPTS_WINDOW_MS) {
+    verifyAttempts.delete(phone);
+    return false;
+  }
+  return entry.count >= MAX_VERIFY_ATTEMPTS;
+};
+
+const registerFailedAttempt = (phone) => {
+  const entry = verifyAttempts.get(phone);
+  if (!entry || Date.now() - entry.windowStart > ATTEMPTS_WINDOW_MS) {
+    verifyAttempts.set(phone, { count: 1, windowStart: Date.now() });
+  } else {
+    entry.count += 1;
+  }
+};
+
 // 1. שליחת קוד אימות ב-SMS (OTP)
 const sendSms = async (req, res) => {
   try {
@@ -9,6 +34,14 @@ const sendSms = async (req, res) => {
     if (!phone) {
       return res.status(400).json({ error: "מספר טלפון הוא שדה חובה" });
     }
+
+    // איפוס מונה הניסיונות השגויים בכל בקשה לקוד חדש
+    verifyAttempts.delete(phone);
+
+    // 👈 מחיקת קודי אימות ישנים של אותו טלפון לפני יצירת קוד חדש
+    await prisma.verificationCode.deleteMany({
+      where: { phone },
+    });
 
     // ייצור קוד אקראי בן 4 ספרות
     const generatedCode = Math.floor(1000 + Math.random() * 9000).toString();
@@ -44,6 +77,12 @@ const verifySms = async (req, res) => {
       return res.status(400).json({ error: "מספר טלפון וקוד הם שדות חובה" });
     }
 
+    if (isRateLimited(phone)) {
+      return res.status(429).json({
+        error: "יותר מדי ניסיונות שגויים. יש לבקש קוד אימות חדש.",
+      });
+    }
+
     // חיפוש קוד האימות האחרון שנשלח לטלפון הזה
     const verification = await prisma.verificationCode.findFirst({
       where: { phone, code },
@@ -51,6 +90,7 @@ const verifySms = async (req, res) => {
     });
 
     if (!verification) {
+      registerFailedAttempt(phone);
       return res.status(400).json({ error: "קוד אימות שגוי" });
     }
 
@@ -83,10 +123,13 @@ const verifySms = async (req, res) => {
       where: { phone },
     });
 
+    // איפוס מונה הניסיונות השגויים לאחר אימות מוצלח
+    verifyAttempts.delete(phone);
+
     // יצירת טוקן JWT
     const token = jwt.sign(
       { userId: user.id, role: user.role },
-      process.env.JWT_SECRET || "fallback_secret_key",
+      process.env.JWT_SECRET,
       { expiresIn: "30d" },
     );
 

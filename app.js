@@ -2,6 +2,13 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 
+if (!process.env.JWT_SECRET) {
+  console.error(
+    "❌ חסר משתנה סביבה JWT_SECRET. יש להגדיר אותו בקובץ .env לפני הפעלת השרת.",
+  );
+  process.exit(1);
+}
+
 const mainRoutes = require("./src/routes/mainRouters");
 
 const app = express();

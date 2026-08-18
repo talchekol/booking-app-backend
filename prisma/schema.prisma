@@ -1,4 +1,3 @@
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -9,16 +8,18 @@ datasource db {
 
 // 1. משתמשים (לקוחות ובעלי עסקים)
 model User {
-  id           String        @id @default(uuid())
+  id           String   @id @default(uuid())
   firstName    String?
   lastName     String?
-  phone        String        @unique
-  isVerified   Boolean       @default(false)
-  role         Role          @default(CLIENT)
-  createdAt    DateTime      @default(now())
-  
-  appointments Appointment[]
-  businesses   Business[]
+  phone        String   @unique
+  isVerified   Boolean  @default(false)
+  role         Role     @default(CLIENT)
+  createdAt    DateTime @default(now())
+
+  appointments     Appointment[]
+  businesses       Business[]
+  reviews          Review[]
+  sentSwapRequests SwapRequest[]  @relation("SentRequests")
 }
 
 enum Role {
@@ -37,37 +38,41 @@ model VerificationCode {
 
 // 3. עסקים (מספרה / קליניקה / מכון)
 model Business {
-  id           String        @id @default(uuid())
-  name         String
-  address      String?
-  ownerId      String
-  owner        User          @relation(fields: [ownerId], references: [id])
-  
+  id          String   @id @default(uuid())
+  name        String
+  address     String?
+  description String?
+  logoUrl     String?
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id])
+
   providers    Provider[]
   services     Service[]
   appointments Appointment[]
+  reviews      Review[]
   createdAt    DateTime      @default(now())
 }
 
-// 4. מעניקי השירות / אנשי צוות (ספר, מעצבת, מאמן)
+// 4. מעניקי השירות / אנשי צוות (ספר, מעצבת)
 model Provider {
-  id           String        @id @default(uuid())
-  name         String
-  businessId   String
-  business     Business      @relation(fields: [businessId], references: [id])
-  
+  id         String   @id @default(uuid())
+  name       String
+  imageUrl   String?
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id])
+
   appointments Appointment[]
 }
 
 // 5. שירותים ומחירים
 model Service {
-  id          String        @id @default(uuid())
+  id          String   @id @default(uuid())
   name        String
   price       Float
-  durationMin Int           // משך זמן בדקות
+  durationMin Int      // משך זמן בדקות
   businessId  String
-  business    Business      @relation(fields: [businessId], references: [id])
-  
+  business    Business @relation(fields: [businessId], references: [id])
+
   appointments Appointment[]
 }
 
@@ -76,20 +81,24 @@ model Appointment {
   id          String            @id @default(uuid())
   dateTime    DateTime
   status      AppointmentStatus @default(PENDING)
-  
-  userId      String
-  user        User              @relation(fields: [userId], references: [id])
-  
-  businessId  String
-  business    Business          @relation(fields: [businessId], references: [id])
-  
-  providerId  String
-  provider    Provider          @relation(fields: [providerId], references: [id])
-  
-  serviceId   String
-  service     Service           @relation(fields: [serviceId], references: [id])
-  
-  createdAt   DateTime          @default(now())
+  isUpForSwap Boolean           @default(false)
+
+  userId     String
+  user       User             @relation(fields: [userId], references: [id])
+
+  businessId String
+  business   Business         @relation(fields: [businessId], references: [id])
+
+  providerId String
+  provider   Provider         @relation(fields: [providerId], references: [id])
+
+  serviceId  String
+  service    Service          @relation(fields: [serviceId], references: [id])
+
+  swapOffer        SwapOffer?
+  targetInRequests SwapRequest[] @relation("TargetAppointment")
+
+  createdAt DateTime @default(now())
 }
 
 enum AppointmentStatus {
@@ -97,4 +106,50 @@ enum AppointmentStatus {
   CONFIRMED
   CANCELLED
   COMPLETED
+}
+
+// 7. שוק החלפות תורים - הצעות פעילות
+model SwapOffer {
+  id            String      @id @default(uuid())
+  appointmentId String      @unique
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  
+  requests      SwapRequest[]
+  createdAt     DateTime    @default(now())
+}
+
+// 8. בקשות החלפה בין משתמשים
+model SwapRequest {
+  id                   String            @id @default(uuid())
+  swapOfferId          String
+  swapOffer            SwapOffer         @relation(fields: [swapOfferId], references: [id], onDelete: Cascade)
+
+  requesterId          String
+  requester            User              @relation("SentRequests", fields: [requesterId], references: [id])
+
+  offeredAppointmentId String
+  offeredAppointment   Appointment       @relation("TargetAppointment", fields: [offeredAppointmentId], references: [id])
+
+  status               SwapRequestStatus @default(PENDING)
+  createdAt            DateTime          @default(now())
+}
+
+enum SwapRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+// 9. ביקורות ודירוגים
+model Review {
+  id         String   @id @default(uuid())
+  rating     Int      
+  comment    String
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id])
+
+  createdAt  DateTime @default(now())
 }

@@ -10,10 +10,7 @@ const authenticateToken = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET || "fallback_secret_key",
-    );
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded; // שומרים את ה-userId וה-role בתוך ה-req
     next(); // ממשיכים לפונקציה הבאה בקונטרולר
   } catch (error) {
@@ -21,4 +18,14 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
+// דורש שהמשתמש המחובר יהיה בעל תפקיד ADMIN (יש להריץ אחרי authenticateToken)
+const requireAdmin = (req, res, next) => {
+  if (req.user?.role !== "ADMIN") {
+    return res.status(403).json({ error: "הגישה מותרת למנהלים בלבד" });
+  }
+  next();
+};
+
 module.exports = authenticateToken;
+module.exports.authenticateToken = authenticateToken;
+module.exports.requireAdmin = requireAdmin;

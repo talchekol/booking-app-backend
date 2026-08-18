@@ -14,7 +14,7 @@ const getUsers = async (req, res) => {
 // יצירת משתמש חדש
 const createUser = async (req, res) => {
   try {
-    const { phone, firstName, lastName, role } = req.body;
+    const { phone, firstName, lastName } = req.body;
 
     // 1. בדיקת חובה: מספר טלפון הוא שדה חובה
     if (!phone) {
@@ -36,7 +36,7 @@ const createUser = async (req, res) => {
         phone,
         firstName,
         lastName,
-        role: role || "CLIENT", // ברירת מחדל היא לקוח
+        role: "CLIENT", // תפקידי ADMIN מוענקים ידנית ב-DB, לא דרך ה-API
       },
     });
 
