@@ -49,6 +49,7 @@ model Business {
   providers    Provider[]
   services     Service[]
   appointments Appointment[]
+  blockedDays  BlockedDay[]
   reviews      Review[]
   createdAt    DateTime      @default(now())
 }
@@ -62,6 +63,7 @@ model Provider {
   business   Business @relation(fields: [businessId], references: [id])
 
   appointments Appointment[]
+  blockedDays  BlockedDay[]
 }
 
 // 5. שירותים ומחירים
@@ -139,6 +141,17 @@ enum SwapRequestStatus {
   APPROVED
   REJECTED
   CANCELLED
+}
+
+model BlockedDay {
+  id         String   @id @default(uuid())
+  date       String   // פורמט YYYY-MM-DD
+  reason     String?
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  providerId String?  // אם null = כל העסק סגור, אם יש ID = הספר הספציפי חופש
+  provider   Provider? @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
 }
 
 // 9. ביקורות ודירוגים
