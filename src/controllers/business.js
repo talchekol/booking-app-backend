@@ -1,13 +1,20 @@
-const prisma = require("../config/prisma"); // ודא שזה הנתיב לקובץ ה-Prisma Client שלך
+const prisma = require("../config/prisma");
 
-// פונקציית עזר למציאת ה-businessId הראשון/של המשתמש
+// פונקציית עזר לשליפת businessId
+// הדירוג לפי createdAt מבטיח שאם קיימות כמה רשומות עסק לאותו בעלים (למשל בגלל seed כפול),
+// כל הקריאות בשרת (קריאה ועדכון כאחד) יצביעו תמיד על אותה רשומה בדיוק
 const getTargetBusinessId = async (userId) => {
-  const userBusiness = await prisma.business.findFirst({
-    where: { ownerId: userId },
-  });
-  if (userBusiness) return userBusiness.id;
+  if (userId) {
+    const userBusiness = await prisma.business.findFirst({
+      where: { ownerId: userId },
+      orderBy: { createdAt: "asc" },
+    });
+    if (userBusiness) return userBusiness.id;
+  }
 
-  const defaultBusiness = await prisma.business.findFirst();
+  const defaultBusiness = await prisma.business.findFirst({
+    orderBy: { createdAt: "asc" },
+  });
   return defaultBusiness ? defaultBusiness.id : null;
 };
 
@@ -15,11 +22,17 @@ const getTargetBusinessId = async (userId) => {
 // 1. יומן תורים (Calendar & Operations)
 // ==========================================
 
-// שליפת יומן התורים לפי תאריך / ספר
+// שליפת יומן התורים לפי תאריך / ספר (פתוח ללקוח ולמנהל)
 exports.getBusinessAppointments = async (req, res) => {
   try {
-    const { date, providerId } = req.query;
+    const { date, providerId, businessId } = req.query;
+    const targetBusinessId =
+      businessId || (await getTargetBusinessId(req.user?.id));
+
     const whereClause = {};
+    if (targetBusinessId) {
+      whereClause.businessId = targetBusinessId;
+    }
 
     if (date) {
       const startOfDay = new Date(`${date}T00:00:00.000Z`);
@@ -55,7 +68,7 @@ exports.getBusinessAppointments = async (req, res) => {
   }
 };
 
-// עדכון סטטוס תור (PENDING, CONFIRMED, CANCELLED, COMPLETED)
+// עדכון סטטוס תור
 exports.updateAppointmentStatus = async (req, res) => {
   try {
     const { id } = req.params;
@@ -65,7 +78,6 @@ exports.updateAppointmentStatus = async (req, res) => {
       status = status.toUpperCase();
     }
 
-    // התאמה למקרה שהפרונט שולח NO_SHOW (בסכמה קיים CANCELLED)
     if (status === "NO_SHOW") status = "CANCELLED";
 
     const validStatuses = ["PENDING", "CONFIRMED", "CANCELLED", "COMPLETED"];
@@ -90,7 +102,7 @@ exports.updateAppointmentStatus = async (req, res) => {
   }
 };
 
-// קביעת תור ידני ע"י בעל העסק (Walk-in / טלפוני)
+// קביעת תור ידני ע"י בעל העסק
 exports.createManualAppointment = async (req, res) => {
   try {
     const { clientName, clientPhone, providerId, serviceId, dateTime } =
@@ -108,10 +120,7 @@ exports.createManualAppointment = async (req, res) => {
       return res.status(404).json({ error: "ספר לא נמצא" });
     }
 
-    // חיבור או יצירת משתמש זמני עבור התור הידני
-    let userId = req.user?.id;
     const phoneToUse = clientPhone || `walkin-${Date.now()}`;
-
     const clientUser = await prisma.user.upsert({
       where: { phone: phoneToUse },
       update: { firstName: clientName || undefined },
@@ -122,9 +131,7 @@ exports.createManualAppointment = async (req, res) => {
         role: "CLIENT",
       },
     });
-    userId = clientUser.id;
 
-    // בדיקת תפיסות משבצת זמן
     const targetDate = new Date(dateTime);
     const existing = await prisma.appointment.findFirst({
       where: {
@@ -145,7 +152,7 @@ exports.createManualAppointment = async (req, res) => {
         businessId: provider.businessId,
         providerId,
         serviceId,
-        userId,
+        userId: clientUser.id,
         dateTime: targetDate,
         status: "CONFIRMED",
       },
@@ -163,11 +170,79 @@ exports.createManualAppointment = async (req, res) => {
   }
 };
 
-/// חסימת טווח שעות בלבד)
+// שליפת הגדרות העסק (שעות פתיחה, משך משבצת, וכו')
+exports.getBusinessSettings = async (req, res) => {
+  try {
+    const { businessId } = req.query;
+    const targetBusinessId =
+      businessId || (await getTargetBusinessId(req.user?.id));
+
+    const business = targetBusinessId
+      ? await prisma.business.findUnique({
+          where: { id: targetBusinessId },
+          select: {
+            openTime: true,
+            closeTime: true,
+            slotInterval: true,
+            bookingOpenUntil: true,
+          },
+        })
+      : null;
+
+    res.json({
+      openTime: business?.openTime || "09:00",
+      closeTime: business?.closeTime || "19:30",
+      slotInterval: Number(business?.slotInterval) || 30,
+      bookingOpenUntil: business?.bookingOpenUntil || null,
+    });
+  } catch (error) {
+    console.error("Error fetching business settings:", error);
+    res.status(500).json({ error: "שגיאה בשליפת הגדרות העסק" });
+  }
+};
+
+// עדכון שעות פתיחה, סגירה ומרווח תורים
+exports.updateBusinessSettings = async (req, res) => {
+  try {
+    const { openTime, closeTime, slotInterval } = req.body;
+    const currentUserId = req.user?.id || req.user?.userId;
+
+    const dataToUpdate = {};
+    if (openTime) dataToUpdate.openTime = openTime;
+    if (closeTime) dataToUpdate.closeTime = closeTime;
+    if (slotInterval !== undefined && slotInterval !== null) {
+      dataToUpdate.slotInterval = parseInt(slotInterval, 10);
+    }
+
+    // מציאת העסק הרלוונטי - אותה לוגיקת זיהוי בדיוק כמו ב-getBusinessSettings,
+    // כדי שהעדכון תמיד יפגע ברשומה שהלקוח בפועל קורא ממנה
+    const targetBusinessId = await getTargetBusinessId(currentUserId);
+
+    if (!targetBusinessId) {
+      return res.status(404).json({ error: "לא נמצא עסק לעדכון" });
+    }
+
+    // עדכון ודאי וישיר לפי ID
+    const updated = await prisma.business.update({
+      where: { id: targetBusinessId },
+      data: dataToUpdate,
+    });
+
+    res.json({
+      success: true,
+      message: "הגדרות עודכנו בהצלחה",
+      settings: updated,
+    });
+  } catch (error) {
+    console.error("Error updating business settings:", error);
+    res.status(500).json({ error: "שגיאה בעדכון הגדרות העסק" });
+  }
+};
+// חסימת טווח שעות כרשומה אחת בודדת ומהירה
+// חסימת טווח שעות מוגנת ויציבה (בשאילתה אחת מהירה)
 exports.blockTimeRange = async (req, res) => {
   try {
     const { date, startTime, endTime, reason, providerId } = req.body;
-
     const currentUserId = req.user?.id || req.user?.userId;
 
     if (!date || !startTime || !endTime) {
@@ -176,110 +251,101 @@ exports.blockTimeRange = async (req, res) => {
         .json({ error: "חובה לציין תאריך, שעת התחלה ושעת סיום" });
     }
 
-    const businessId = await getTargetBusinessId(req.user?.id);
+    // איתור מזהה העסק
+    let businessId = null;
+    if (typeof getTargetBusinessId === "function") {
+      businessId = await getTargetBusinessId(currentUserId);
+    }
+    if (!businessId) {
+      const biz = await prisma.business.findFirst({ select: { id: true } });
+      businessId = biz?.id;
+    }
+
     if (!businessId) {
       return res.status(400).json({ error: "לא נמצא עסק מקושר" });
     }
 
-    // מציאת או יצירת שירות מערכת פנימי עבור חסימות
+    // חישוב משך החסימה הכולל בדקות
+    const [startH, startM] = startTime.split(":").map(Number);
+    const [endH, endM] = endTime.split(":").map(Number);
+    const durationMin = endH * 60 + endM - (startH * 60 + startM);
+
+    if (durationMin <= 0) {
+      return res
+        .status(400)
+        .json({ error: "שעת הסיום חייבת להיות אחרי שעת ההתחלה" });
+    }
+
+    // מציאת או יצירת שירות חסימה ייעודי עם המשך הנבחר
+    const serviceName = reason ? `חסום: ${reason}` : "חסום";
     let blockService = await prisma.service.findFirst({
-      where: { businessId, name: "חסום" },
+      where: { businessId, name: serviceName, durationMin },
     });
 
     if (!blockService) {
       blockService = await prisma.service.create({
         data: {
-          name: reason ? `חסום: ${reason}` : "חסום",
+          name: serviceName,
           price: 0,
-          durationMin: 30,
+          durationMin,
           businessId,
         },
       });
     }
 
-    // בחירת הספר הספציפי או כל הצוות
+    // רשימת הספרים שעבורם חוסמים
     let targetProviders = [];
     if (providerId) {
-      const p = await prisma.provider.findUnique({ where: { id: providerId } });
-      if (p) targetProviders.push(p);
+      targetProviders = [{ id: providerId }];
     } else {
       targetProviders = await prisma.provider.findMany({
         where: { businessId },
+        select: { id: true },
       });
     }
 
-    const createdBlocks = [];
-    const startHour = parseInt(startTime.split(":")[0], 10);
-    const endHour = parseInt(endTime.split(":")[0], 10);
-
-    for (let hour = startHour; hour < endHour; hour++) {
-      for (const minute of [0, 30]) {
-        const timeStr = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
-        const blockDateTime = new Date(`${date}T${timeStr}.000Z`);
-
-        for (const prov of targetProviders) {
-          // מחיקת תור/חסימה קיימת במשבצת כדי למנוע כפילויות
-          await prisma.appointment.deleteMany({
-            where: {
-              providerId: prov.id,
-              dateTime: blockDateTime,
-            },
-          });
-
-          // יצירת חסימה חדשה
-          const blockApt = await prisma.appointment.create({
-            data: {
-              dateTime: blockDateTime,
-              status: "CANCELLED",
-              businessId,
-              providerId: prov.id,
-              serviceId: blockService.id,
-              userId: currentUserId,
-            },
-          });
-          createdBlocks.push(blockApt);
-        }
-      }
+    // אם עדיין אין ספרים מוגדרים במסד הנתונים
+    if (targetProviders.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "לא נמצאו נותני שירות (ספרים) במערכת" });
     }
 
-    res
-      .status(201)
-      .json({ message: "טווח השעות נחסם בהצלחה", count: createdBlocks.length });
-  } catch (error) {
-    console.error("Error blocking time:", error);
-    res.status(500).json({ error: "שגיאה בביצוע חסימת השעות" });
-  }
-};
-// 1. שליפת חסימות יום (מוחזר יחד עם התורים או כשאילתה נפרדת)
-exports.getBlockedDays = async (req, res) => {
-  try {
-    const { date } = req.query;
-    const currentUserId = req.user?.id || req.user?.userId;
-    const businessId = await getTargetBusinessId(currentUserId);
+    const blockStartDateTime = new Date(`${date}T${startTime}:00.000Z`);
+    const providerIds = targetProviders.map((p) => p.id);
 
-    if (!businessId) {
-      return res.json([]);
-    }
-
-    const whereClause = { businessId };
-    if (date) whereClause.date = date;
-
-    const blockedDays = await prisma.blockedDay.findMany({
-      where: whereClause,
-      include: {
-        provider: { select: { id: true, name: true } },
+    // מחיקת חסימות קודמות באותה משבצת בדיוק
+    await prisma.appointment.deleteMany({
+      where: {
+        providerId: { in: providerIds },
+        dateTime: blockStartDateTime,
       },
-      orderBy: { createdAt: "desc" },
     });
 
-    res.json(blockedDays);
+    // יצירת רשומות החסימה במכה אחת
+    const records = providerIds.map((pId) => ({
+      dateTime: blockStartDateTime,
+      status: "CONFIRMED",
+      businessId,
+      providerId: pId,
+      serviceId: blockService.id,
+      userId: currentUserId || null,
+    }));
+
+    await prisma.appointment.createMany({
+      data: records,
+    });
+
+    res.status(201).json({ message: "טווח השעות נחסם בהצלחה" });
   } catch (error) {
-    console.error("Error fetching blocked days:", error);
-    res.status(500).json({ error: "שגיאה בשליפת ימי חופש" });
+    console.error("Error blocking time range:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "שגיאה בביצוע חסימת השעות" });
   }
 };
 
-/// יצירת חסימת יום (מטפל נכון גם בספר ספציפי וגם בכל העסק)
+// יצירת חסימת יום
 exports.blockFullDay = async (req, res) => {
   try {
     const { date, providerId, reason } = req.body;
@@ -295,26 +361,18 @@ exports.blockFullDay = async (req, res) => {
       return res.status(400).json({ error: "לא נמצא עסק מקושר למשתמש" });
     }
 
-    // נירמול providerId - אם ריק או לא הועבר, שומרים כ-null
     const targetProviderId =
       providerId && providerId.trim() !== "" ? providerId : null;
 
-    // מחיקת חסימה קודמת קיימת לאותו תאריך וספר
-    const whereDelete = {
-      date,
-      businessId,
-    };
+    const whereDelete = { date, businessId };
     if (targetProviderId) {
       whereDelete.providerId = targetProviderId;
     } else {
       whereDelete.providerId = null;
     }
 
-    await prisma.blockedDay.deleteMany({
-      where: whereDelete,
-    });
+    await prisma.blockedDay.deleteMany({ where: whereDelete });
 
-    // יצירת רשומת חסימת היום
     const blocked = await prisma.blockedDay.create({
       data: {
         date,
@@ -330,19 +388,16 @@ exports.blockFullDay = async (req, res) => {
     res.status(201).json(blocked);
   } catch (error) {
     console.error("Error creating blocked day:", error);
+
     res.status(500).json({ error: "שגיאה ביצירת חסימת יום: " + error.message });
   }
 };
 
-// 3. ביטול חסימת יום שלם
+// ביטול חסימת יום
 exports.unblockFullDay = async (req, res) => {
   try {
     const { id } = req.params;
-
-    await prisma.blockedDay.delete({
-      where: { id },
-    });
-
+    await prisma.blockedDay.delete({ where: { id } });
     res.json({ message: "חסימת היום בוטלה בהצלחה" });
   } catch (error) {
     console.error("Error unblocking day:", error);
@@ -350,23 +405,44 @@ exports.unblockFullDay = async (req, res) => {
   }
 };
 
-// ביטול חסימת שעה בודדת (מחיקת רשומת התור החסום)
+// ביטול חסימת שעה בודדת
 exports.unblockSingleAppointment = async (req, res) => {
   try {
     const { id } = req.params;
-
     if (!id) {
       return res.status(400).json({ error: "מזהה חסימה חסר" });
     }
 
-    await prisma.appointment.delete({
-      where: { id },
-    });
-
+    await prisma.appointment.delete({ where: { id } });
     res.json({ message: "החסימה בוטלה בהצלחה" });
   } catch (error) {
     console.error("Error deleting blocked slot:", error);
     res.status(500).json({ error: "שגיאה בביטול החסימה" });
+  }
+};
+
+// שליפת ימים חסומים
+exports.getBlockedDays = async (req, res) => {
+  try {
+    const { date, businessId } = req.query;
+    const targetBusinessId =
+      businessId || (await getTargetBusinessId(req.user?.id));
+
+    const whereClause = {};
+    if (targetBusinessId) whereClause.businessId = targetBusinessId;
+    if (date) whereClause.date = date;
+
+    const blockedDays = await prisma.blockedDay.findMany({
+      where: whereClause,
+      include: {
+        provider: { select: { id: true, name: true } },
+      },
+    });
+
+    res.json(blockedDays);
+  } catch (error) {
+    console.error("Error fetching blocked days:", error);
+    res.status(500).json({ error: "שגיאה בשליפת ימים חסומים" });
   }
 };
 
@@ -509,6 +585,87 @@ exports.deleteProvider = async (req, res) => {
 };
 
 // ==========================================
+// 5. הודעות מערכת ועדכונים (Broadcasts)
+// ==========================================
+
+// שליפת ההודעה הפעילה האחרונה (פתוח ללקוחות)
+exports.getActiveBroadcast = async (req, res) => {
+  try {
+    const businessId = await getTargetBusinessId(req.user?.id);
+    const broadcast = await prisma.broadcast.findFirst({
+      where: {
+        ...(businessId && { businessId }),
+        isActive: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(broadcast || null);
+  } catch (error) {
+    console.error("Error fetching active broadcast:", error);
+    res.status(500).json({ error: "שגיאה בשליפת הודעת מערכת" });
+  }
+};
+
+// שליפת כל ההודעות (למנהל)
+exports.getAllBroadcasts = async (req, res) => {
+  try {
+    const businessId = await getTargetBusinessId(req.user?.id);
+    const broadcasts = await prisma.broadcast.findMany({
+      where: {
+        ...(businessId && { businessId }),
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(broadcasts);
+  } catch (error) {
+    console.error("Error fetching broadcasts:", error);
+    res.status(500).json({ error: "שגיאה בשליפת היסטוריית הודעות" });
+  }
+};
+
+// יצירת הודעת מערכת חדשה
+exports.createBroadcast = async (req, res) => {
+  try {
+    const { message } = req.body;
+    const currentUserId = req.user?.id || req.user?.userId;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "תוכן ההודעה אינו יכול להיות ריק" });
+    }
+
+    const businessId = await getTargetBusinessId(currentUserId);
+    if (!businessId) {
+      return res.status(400).json({ error: "לא נמצא עסק מקושר" });
+    }
+
+    const broadcast = await prisma.broadcast.create({
+      data: {
+        message: message.trim(),
+        businessId,
+        isActive: true,
+      },
+    });
+
+    res.status(201).json(broadcast);
+  } catch (error) {
+    console.error("Error creating broadcast:", error);
+    res.status(500).json({ error: "שגיאה בפרסום הודעת מערכת" });
+  }
+};
+
+// מחיקת הודעת מערכת
+exports.deleteBroadcast = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await prisma.broadcast.delete({ where: { id } });
+    res.json({ message: "ההודעה נמחקה בהצלחה" });
+  } catch (error) {
+    console.error("Error deleting broadcast:", error);
+    res.status(500).json({ error: "שגיאה במחיקת הודעה" });
+  }
+};
+
+// ==========================================
 // 4. סטטיסטיקה ודוחות (KPIs)
 // ==========================================
 
@@ -518,7 +675,6 @@ exports.getBusinessStats = async (req, res) => {
     const startOfToday = new Date(today.setHours(0, 0, 0, 0));
     const endOfToday = new Date(today.setHours(23, 59, 59, 999));
 
-    // תורים של היום
     const todayAppointments = await prisma.appointment.findMany({
       where: {
         dateTime: { gte: startOfToday, lte: endOfToday },

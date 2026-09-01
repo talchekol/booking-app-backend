@@ -3,7 +3,7 @@ const prisma = require("../config/prisma");
 // 1. קביעת תור חדש
 const createAppointment = async (req, res) => {
   try {
-    const userId = req.user.userId; // מגיע מ-Middleware של JWT
+    const userId = req.user.userId || req.user.id;
     const { dateTime, businessId, providerId, serviceId } = req.body;
 
     if (!dateTime || !businessId || !providerId || !serviceId) {
@@ -12,7 +12,7 @@ const createAppointment = async (req, res) => {
 
     const parsedDateTime = new Date(dateTime);
 
-    // בדיקה שלמשתמש אין כבר תור עתידי פעיל (המסכים בפרונט מציגים תור עתידי יחיד)
+    // בדיקה שלמשתמש אין כבר תור עתידי פעיל
     const existingUpcoming = await prisma.appointment.findFirst({
       where: {
         userId,
@@ -39,7 +39,9 @@ const createAppointment = async (req, res) => {
     if (conflictingAppointment) {
       return res
         .status(409)
-        .json({ error: "המועד הזה כבר תפוס אצל הספק הנבחר, יש לבחור מועד אחר" });
+        .json({
+          error: "המועד הזה כבר תפוס אצל הספק הנבחר, יש לבחור מועד אחר",
+        });
     }
 
     const appointment = await prisma.appointment.create({
@@ -68,7 +70,7 @@ const createAppointment = async (req, res) => {
 // 2. שליפת התור הקרוב של המשתמש + היסטוריית תורים
 const getMyAppointments = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.userId || req.user.id;
 
     const appointments = await prisma.appointment.findMany({
       where: { userId },
@@ -81,8 +83,12 @@ const getMyAppointments = async (req, res) => {
     });
 
     const now = new Date();
-    const upcoming = appointments.find(app => new Date(app.dateTime) >= now && app.status !== "CANCELLED");
-    const history = appointments.filter(app => new Date(app.dateTime) < now || app.status === "CANCELLED");
+    const upcoming = appointments.find(
+      (app) => new Date(app.dateTime) >= now && app.status !== "CANCELLED",
+    );
+    const history = appointments.filter(
+      (app) => new Date(app.dateTime) < now || app.status === "CANCELLED",
+    );
 
     res.status(200).json({
       upcoming: upcoming || null,
@@ -97,7 +103,7 @@ const getMyAppointments = async (req, res) => {
 // 3. ביטול תור
 const cancelAppointment = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.userId || req.user.id;
     const { appointmentId } = req.params;
 
     const appointment = await prisma.appointment.findUnique({
@@ -105,15 +111,22 @@ const cancelAppointment = async (req, res) => {
     });
 
     if (!appointment || appointment.userId !== userId) {
-      return res.status(404).json({ error: "התור לא נמצא או שאינך מורשה לבטלו" });
+      return res
+        .status(404)
+        .json({ error: "התור לא נמצא או שאינך מורשה לבטלו" });
     }
 
     const updated = await prisma.appointment.update({
       where: { id: appointmentId },
-      data: { 
+      data: {
         status: "CANCELLED",
-        isUpForSwap: false // מחיקה אוטומטית מסטטוס החלפה
+        isUpForSwap: false,
       },
+    });
+
+    // הסרת הצעות פתוחות משוק ההחלפות במידה והיו
+    await prisma.swapOffer.deleteMany({
+      where: { appointmentId },
     });
 
     res.status(200).json({ message: "התור בוטל בהצלחה", appointment: updated });
@@ -126,7 +139,7 @@ const cancelAppointment = async (req, res) => {
 // 4. העלאת / הורדת תור משוק ההחלפות
 const toggleSwapOffer = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.userId || req.user.id;
     const { appointmentId } = req.body;
 
     const appointment = await prisma.appointment.findUnique({
@@ -145,7 +158,6 @@ const toggleSwapOffer = async (req, res) => {
 
     const newSwapState = !appointment.isUpForSwap;
 
-    // עדכון הסטטוס בתור ויצירה/הסרה של הרשומה בשוק ההחלפות כפעולה אטומית אחת
     await prisma.$transaction(async (tx) => {
       await tx.appointment.update({
         where: { id: appointmentId },
@@ -173,12 +185,12 @@ const toggleSwapOffer = async (req, res) => {
 // 5. שליפת כל התורים המוצעים להחלפה (שוק ההחלפות)
 const getAvailableSwaps = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.userId || req.user.id;
 
     const offers = await prisma.swapOffer.findMany({
       where: {
         appointment: {
-          userId: { not: userId }, // לא מציג את התורים של המשתמש עצמו
+          userId: { not: userId },
           dateTime: { gte: new Date() },
           status: "CONFIRMED",
         },
@@ -186,12 +198,15 @@ const getAvailableSwaps = async (req, res) => {
       include: {
         appointment: {
           include: {
-            user: true,
-            provider: true,
-            service: true,
+            user: { select: { id: true, firstName: true, phone: true } },
+            provider: { select: { id: true, name: true, imageUrl: true } },
+            service: {
+              select: { id: true, name: true, price: true, durationMin: true },
+            },
           },
         },
       },
+      orderBy: { createdAt: "desc" },
     });
 
     res.status(200).json(offers);
@@ -204,7 +219,7 @@ const getAvailableSwaps = async (req, res) => {
 // 6. שליחת בקשת החלפה עבור הצעה בשוק
 const requestSwap = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.userId || req.user.id;
     const { swapOfferId, offeredAppointmentId } = req.body;
 
     if (!swapOfferId || !offeredAppointmentId) {
@@ -243,13 +258,17 @@ const requestSwap = async (req, res) => {
     });
 
     if (existing) {
-      return res
-        .status(400)
-        .json({ error: "כבר שלחת בקשת החלפה עבור תור זה" });
+      return res.status(400).json({ error: "כבר שלחת בקשת החלפה עבור תור זה" });
     }
 
     const swapRequest = await prisma.swapRequest.create({
-      data: { swapOfferId, requesterId: userId, offeredAppointmentId },
+      data: {
+        swapOfferId,
+        requesterId: userId,
+        ownerId: swapOffer.appointment.userId,
+        offeredAppointmentId,
+        ownerAppointmentId: swapOffer.appointmentId,
+      },
     });
 
     res.status(201).json(swapRequest);
@@ -259,38 +278,39 @@ const requestSwap = async (req, res) => {
   }
 };
 
-// 7. שליפת בקשות ההחלפה שלי (שקיבלתי ושלחתי)
+// 7. שליפת בקשות ההחלפה שלי (כולל מאושרות אחרונות)
 const getMySwapRequests = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.userId || req.user.id;
 
     const [incoming, outgoing] = await Promise.all([
       prisma.swapRequest.findMany({
-        where: { status: "PENDING", swapOffer: { appointment: { userId } } },
+        where: { ownerId: userId },
         include: {
-          requester: true,
-          offeredAppointment: { include: { service: true, provider: true } },
-          swapOffer: {
-            include: {
-              appointment: { include: { service: true, provider: true } },
-            },
+          requester: { select: { id: true, firstName: true, phone: true } },
+          offeredAppointment: {
+            include: { service: true, provider: true },
+          },
+          ownerAppointment: {
+            include: { service: true, provider: true },
           },
         },
         orderBy: { createdAt: "desc" },
+        take: 10,
       }),
       prisma.swapRequest.findMany({
-        where: { status: "PENDING", requesterId: userId },
+        where: { requesterId: userId },
         include: {
-          offeredAppointment: { include: { service: true, provider: true } },
-          swapOffer: {
-            include: {
-              appointment: {
-                include: { service: true, provider: true, user: true },
-              },
-            },
+          owner: { select: { id: true, firstName: true, phone: true } },
+          offeredAppointment: {
+            include: { service: true, provider: true },
+          },
+          ownerAppointment: {
+            include: { service: true, provider: true },
           },
         },
         orderBy: { createdAt: "desc" },
+        take: 10,
       }),
     ]);
 
@@ -301,16 +321,16 @@ const getMySwapRequests = async (req, res) => {
   }
 };
 
-// 8. אישור בקשת החלפה - מחליף את הבעלים בין שני התורים
+// 8. אישור בקשת החלפה - החלפת בעלים אטומית ומדויקת
 const approveSwapRequest = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const currentUserId = req.user.userId || req.user.id;
     const { requestId } = req.params;
 
     const swapRequest = await prisma.swapRequest.findUnique({
       where: { id: requestId },
       include: {
-        swapOffer: { include: { appointment: true } },
+        ownerAppointment: true,
         offeredAppointment: true,
       },
     });
@@ -321,98 +341,80 @@ const approveSwapRequest = async (req, res) => {
         .json({ error: "בקשת ההחלפה לא נמצאה או שכבר טופלה" });
     }
 
-    const targetAppointment = swapRequest.swapOffer.appointment;
-    const offeredAppointment = swapRequest.offeredAppointment;
+    const apptA = swapRequest.ownerAppointment; // התור של המאשר
+    const apptB = swapRequest.offeredAppointment; // התור של המבקש
 
-    if (targetAppointment.userId !== userId) {
+    if (!apptA || !apptB) {
+      return res.status(400).json({ error: "אחד התורים לא נמצא במערכת" });
+    }
+
+    if (swapRequest.ownerId !== currentUserId) {
       return res.status(403).json({ error: "אינך מורשה לאשר בקשה זו" });
     }
 
-    try {
-      await prisma.$transaction(async (tx) => {
-        const targetOwnerId = targetAppointment.userId;
-        const offeredOwnerId = offeredAppointment.userId;
+    const userA_Id = apptA.userId;
+    const userB_Id = apptB.userId;
 
-        // ננעל את הבקשה תוך כדי הטרנזקציה - מונע אישור/דחייה כפולים במקביל (TOCTOU)
-        const claimedRequest = await tx.swapRequest.updateMany({
-          where: { id: swapRequest.id, status: "PENDING" },
-          data: { status: "APPROVED" },
-        });
-        if (claimedRequest.count === 0) {
-          throw new Error("SWAP_ALREADY_HANDLED");
-        }
+    await prisma.$transaction([
+      // 1. עדכון סטטוס הבקשה למאושרת
+      prisma.swapRequest.update({
+        where: { id: swapRequest.id },
+        data: { status: "APPROVED" },
+      }),
 
-        // מוודאים ששני התורים עדיין במצב תקין להחלפה (לא בוטלו/שונו מאז שהבקשה נשלחה)
-        const targetUpdated = await tx.appointment.updateMany({
-          where: {
-            id: targetAppointment.id,
-            status: "CONFIRMED",
-            userId: targetOwnerId,
-            isUpForSwap: true,
-          },
-          data: { userId: offeredOwnerId, isUpForSwap: false },
-        });
+      // 2. תור A עובר ישירות למשתמש B
+      prisma.appointment.update({
+        where: { id: apptA.id },
+        data: {
+          userId: userB_Id,
+          isUpForSwap: false,
+        },
+      }),
 
-        const offeredUpdated = await tx.appointment.updateMany({
-          where: {
-            id: offeredAppointment.id,
-            status: "CONFIRMED",
-            userId: offeredOwnerId,
-          },
-          data: { userId: targetOwnerId, isUpForSwap: false },
-        });
+      // 3. תור B עובר ישירות למשתמש A
+      prisma.appointment.update({
+        where: { id: apptB.id },
+        data: {
+          userId: userA_Id,
+          isUpForSwap: false,
+        },
+      }),
 
-        if (targetUpdated.count === 0 || offeredUpdated.count === 0) {
-          throw new Error("SWAP_STALE_STATE");
-        }
+      // 4. מחיקת ההצעות משוק ההחלפות
+      prisma.swapOffer.deleteMany({
+        where: {
+          appointmentId: { in: [apptA.id, apptB.id] },
+        },
+      }),
 
-        // מחיקת בקשות ממתינות אחרות שהציעו את אחד התורים האלה להחלפה
-        await tx.swapRequest.deleteMany({
-          where: {
-            id: { not: swapRequest.id },
-            offeredAppointmentId: {
-              in: [targetAppointment.id, offeredAppointment.id],
-            },
-          },
-        });
-
-        // הסרת שתי ההצעות מהשוק (מוחק בהתמדה גם את שאר הבקשות הממתינות עליהן)
-        await tx.swapOffer.deleteMany({
-          where: {
-            appointmentId: {
-              in: [targetAppointment.id, offeredAppointment.id],
-            },
-          },
-        });
-      });
-    } catch (txError) {
-      if (
-        txError.message === "SWAP_ALREADY_HANDLED" ||
-        txError.message === "SWAP_STALE_STATE"
-      ) {
-        return res
-          .status(409)
-          .json({ error: "אחד התורים כבר לא זמין להחלפה, נסה לרענן ולנסות שוב" });
-      }
-      throw txError;
-    }
+      // 5. מחיקת שאר הבקשות הממתינות המקבילות
+      prisma.swapRequest.deleteMany({
+        where: {
+          id: { not: swapRequest.id },
+          status: "PENDING",
+          OR: [
+            { offeredAppointmentId: { in: [apptA.id, apptB.id] } },
+            { ownerAppointmentId: { in: [apptA.id, apptB.id] } },
+          ],
+        },
+      }),
+    ]);
 
     res.status(200).json({ message: "ההחלפה בוצעה בהצלחה!" });
   } catch (error) {
     console.error("Error approving swap request:", error);
-    res.status(500).json({ error: "שגיאה באישור ההחלפה" });
+    res.status(500).json({ error: "שגיאה בביצוע ההחלפה" });
   }
 };
 
 // 9. דחיית / ביטול בקשת החלפה
 const rejectSwapRequest = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.userId || req.user.id;
     const { requestId } = req.params;
 
     const swapRequest = await prisma.swapRequest.findUnique({
       where: { id: requestId },
-      include: { swapOffer: { include: { appointment: true } } },
     });
 
     if (!swapRequest || swapRequest.status !== "PENDING") {
@@ -421,7 +423,7 @@ const rejectSwapRequest = async (req, res) => {
         .json({ error: "בקשת ההחלפה לא נמצאה או שכבר טופלה" });
     }
 
-    const isOwner = swapRequest.swapOffer.appointment.userId === userId;
+    const isOwner = swapRequest.ownerId === userId;
     const isRequester = swapRequest.requesterId === userId;
 
     if (!isOwner && !isRequester) {

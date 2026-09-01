@@ -19,7 +19,8 @@ model User {
   appointments     Appointment[]
   businesses       Business[]
   reviews          Review[]
-  sentSwapRequests SwapRequest[]  @relation("SentRequests")
+  sentSwapRequests     SwapRequest[]  @relation("SentRequests")
+  receivedSwapRequests SwapRequest[]  @relation("OwnerRequests")
 }
 
 enum Role {
@@ -46,11 +47,20 @@ model Business {
   ownerId     String
   owner       User     @relation(fields: [ownerId], references: [id])
 
+  // 👈 הגדרות טווח שעות דינמי ע"י בעל העסק
+  openTime         String        @default("09:00") // שעת פתיחה (HH:mm)
+  closeTime        String        @default("19:30") // שעת סגירה (HH:mm)
+  slotInterval     Int           @default(30)      // מרווח תורים בדקות (15/20/30/45/60)
+
+  // 👈 פתיחת ופרסום יומן שבועי (YYYY-MM-DD - עד מתי היומן פתוח להזמנות)
+  bookingOpenUntil String?
+
   providers    Provider[]
   services     Service[]
   appointments Appointment[]
   blockedDays  BlockedDay[]
   reviews      Review[]
+  broadcasts   Broadcast[]
   createdAt    DateTime      @default(now())
 }
 
@@ -99,6 +109,7 @@ model Appointment {
 
   swapOffer        SwapOffer?
   targetInRequests SwapRequest[] @relation("TargetAppointment")
+  ownerInRequests  SwapRequest[] @relation("OwnerAppointment")
 
   createdAt DateTime @default(now())
 }
@@ -123,14 +134,26 @@ model SwapOffer {
 // 8. בקשות החלפה בין משתמשים
 model SwapRequest {
   id                   String            @id @default(uuid())
-  swapOfferId          String
-  swapOffer            SwapOffer         @relation(fields: [swapOfferId], references: [id], onDelete: Cascade)
+  // אופציונלי + SetNull (במקום Cascade): כשה-SwapOffer נמחק בעת אישור ההחלפה
+  // הבקשה עצמה חייבת להישאר בחיים כרשומת היסטוריה, לא להימחק יחד איתו
+  swapOfferId          String?
+  swapOffer            SwapOffer?        @relation(fields: [swapOfferId], references: [id], onDelete: SetNull)
 
   requesterId          String
   requester            User              @relation("SentRequests", fields: [requesterId], references: [id])
 
+  // בעל ההצעה בזמן יצירת הבקשה - שדה קבוע ובלתי תלוי, כי ה-userId על גבי
+  // Appointment עצמו משתנה ברגע שההחלפה מאושרת (התור עובר לבעלים החדש)
+  ownerId              String
+  owner                User              @relation("OwnerRequests", fields: [ownerId], references: [id])
+
   offeredAppointmentId String
   offeredAppointment   Appointment       @relation("TargetAppointment", fields: [offeredAppointmentId], references: [id])
+
+  // הפניה ישירה (לא דרך SwapOffer) לתור של בעל ההצעה, כדי שהמידע (שעה/שירות)
+  // ישרוד גם אחרי שה-SwapOffer נמחק בעת אישור ההחלפה
+  ownerAppointmentId   String
+  ownerAppointment     Appointment       @relation("OwnerAppointment", fields: [ownerAppointmentId], references: [id])
 
   status               SwapRequestStatus @default(PENDING)
   createdAt            DateTime          @default(now())
@@ -151,6 +174,16 @@ model BlockedDay {
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   providerId String?  // אם null = כל העסק סגור, אם יש ID = הספר הספציפי חופש
   provider   Provider? @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+}
+
+//  הודעות מערכת ועדכונים של בעל העסק ללקוחות 👈 (נוסף)
+model Broadcast {
+  id         String   @id @default(uuid())
+  message    String
+  isActive   Boolean  @default(true)
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   createdAt  DateTime @default(now())
 }
 
