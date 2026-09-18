@@ -1,4 +1,6 @@
 const prisma = require("../config/prisma");
+const jwt = require("jsonwebtoken");
+const { RESERVED_SLUGS, isValidSlugFormat } = require("../utils/reservedSlugs");
 
 // פונקציית עזר לשליפת businessId
 // הדירוג לפי createdAt מבטיח שאם קיימות כמה רשומות עסק לאותו בעלים (למשל בגלל seed כפול),
@@ -85,6 +87,13 @@ exports.updateAppointmentStatus = async (req, res) => {
       return res.status(400).json({ error: "סטטוס תור לא חוקי" });
     }
 
+    const existing = await prisma.appointment.findFirst({
+      where: { id, businessId: req.business.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "התור לא נמצא" });
+    }
+
     const updated = await prisma.appointment.update({
       where: { id },
       data: { status },
@@ -112,8 +121,8 @@ exports.createManualAppointment = async (req, res) => {
       return res.status(400).json({ error: "חסרים פרטי חובה לקביעת התור" });
     }
 
-    const provider = await prisma.provider.findUnique({
-      where: { id: providerId },
+    const provider = await prisma.provider.findFirst({
+      where: { id: providerId, businessId: req.business.id },
     });
 
     if (!provider) {
@@ -205,7 +214,6 @@ exports.getBusinessSettings = async (req, res) => {
 exports.updateBusinessSettings = async (req, res) => {
   try {
     const { openTime, closeTime, slotInterval } = req.body;
-    const currentUserId = req.user?.id || req.user?.userId;
 
     const dataToUpdate = {};
     if (openTime) dataToUpdate.openTime = openTime;
@@ -214,17 +222,9 @@ exports.updateBusinessSettings = async (req, res) => {
       dataToUpdate.slotInterval = parseInt(slotInterval, 10);
     }
 
-    // מציאת העסק הרלוונטי - אותה לוגיקת זיהוי בדיוק כמו ב-getBusinessSettings,
-    // כדי שהעדכון תמיד יפגע ברשומה שהלקוח בפועל קורא ממנה
-    const targetBusinessId = await getTargetBusinessId(currentUserId);
-
-    if (!targetBusinessId) {
-      return res.status(404).json({ error: "לא נמצא עסק לעדכון" });
-    }
-
-    // עדכון ודאי וישיר לפי ID
+    // עדכון ודאי וישיר לפי ID - req.business הוצמד ע"י resolveOwnedBusiness
     const updated = await prisma.business.update({
-      where: { id: targetBusinessId },
+      where: { id: req.business.id },
       data: dataToUpdate,
     });
 
@@ -243,7 +243,6 @@ exports.updateBusinessSettings = async (req, res) => {
 exports.blockTimeRange = async (req, res) => {
   try {
     const { date, startTime, endTime, reason, providerId } = req.body;
-    const currentUserId = req.user?.id || req.user?.userId;
 
     if (!date || !startTime || !endTime) {
       return res
@@ -251,19 +250,8 @@ exports.blockTimeRange = async (req, res) => {
         .json({ error: "חובה לציין תאריך, שעת התחלה ושעת סיום" });
     }
 
-    // איתור מזהה העסק
-    let businessId = null;
-    if (typeof getTargetBusinessId === "function") {
-      businessId = await getTargetBusinessId(currentUserId);
-    }
-    if (!businessId) {
-      const biz = await prisma.business.findFirst({ select: { id: true } });
-      businessId = biz?.id;
-    }
-
-    if (!businessId) {
-      return res.status(400).json({ error: "לא נמצא עסק מקושר" });
-    }
+    // req.business הוצמד ע"י resolveOwnedBusiness - אין עוד fallback לעסק גלובלי כלשהו
+    const businessId = req.business.id;
 
     // חישוב משך החסימה הכולל בדקות
     const [startH, startM] = startTime.split(":").map(Number);
@@ -296,7 +284,10 @@ exports.blockTimeRange = async (req, res) => {
     // רשימת הספרים שעבורם חוסמים
     let targetProviders = [];
     if (providerId) {
-      targetProviders = [{ id: providerId }];
+      targetProviders = await prisma.provider.findMany({
+        where: { id: providerId, businessId },
+        select: { id: true },
+      });
     } else {
       targetProviders = await prisma.provider.findMany({
         where: { businessId },
@@ -354,15 +345,19 @@ exports.blockFullDay = async (req, res) => {
       return res.status(400).json({ error: "חובה לציין תאריך" });
     }
 
-    const currentUserId = req.user?.id || req.user?.userId;
-    const businessId = await getTargetBusinessId(currentUserId);
-
-    if (!businessId) {
-      return res.status(400).json({ error: "לא נמצא עסק מקושר למשתמש" });
-    }
+    const businessId = req.business.id;
 
     const targetProviderId =
       providerId && providerId.trim() !== "" ? providerId : null;
+
+    if (targetProviderId) {
+      const provider = await prisma.provider.findFirst({
+        where: { id: targetProviderId, businessId },
+      });
+      if (!provider) {
+        return res.status(404).json({ error: "ספר לא נמצא" });
+      }
+    }
 
     const whereDelete = { date, businessId };
     if (targetProviderId) {
@@ -397,6 +392,12 @@ exports.blockFullDay = async (req, res) => {
 exports.unblockFullDay = async (req, res) => {
   try {
     const { id } = req.params;
+    const existing = await prisma.blockedDay.findFirst({
+      where: { id, businessId: req.business.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "חסימת היום לא נמצאה" });
+    }
     await prisma.blockedDay.delete({ where: { id } });
     res.json({ message: "חסימת היום בוטלה בהצלחה" });
   } catch (error) {
@@ -411,6 +412,13 @@ exports.unblockSingleAppointment = async (req, res) => {
     const { id } = req.params;
     if (!id) {
       return res.status(400).json({ error: "מזהה חסימה חסר" });
+    }
+
+    const existing = await prisma.appointment.findFirst({
+      where: { id, businessId: req.business.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "החסימה לא נמצאה" });
     }
 
     await prisma.appointment.delete({ where: { id } });
@@ -472,17 +480,12 @@ exports.createService = async (req, res) => {
         .json({ error: "חסרים פרטים: שם, מחיר ומשך זמן בדקות" });
     }
 
-    const businessId = await getTargetBusinessId(req.user?.id);
-    if (!businessId) {
-      return res.status(400).json({ error: "לא נמצא עסק מקושר" });
-    }
-
     const service = await prisma.service.create({
       data: {
         name,
         price: parseFloat(price),
         durationMin: parseInt(durationMin, 10),
-        businessId,
+        businessId: req.business.id,
       },
     });
 
@@ -497,6 +500,13 @@ exports.updateService = async (req, res) => {
   try {
     const { id } = req.params;
     const { name, price, durationMin } = req.body;
+
+    const existing = await prisma.service.findFirst({
+      where: { id, businessId: req.business.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "השירות לא נמצא" });
+    }
 
     const updated = await prisma.service.update({
       where: { id },
@@ -519,6 +529,12 @@ exports.updateService = async (req, res) => {
 exports.deleteService = async (req, res) => {
   try {
     const { id } = req.params;
+    const existing = await prisma.service.findFirst({
+      where: { id, businessId: req.business.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "השירות לא נמצא" });
+    }
     await prisma.service.delete({ where: { id } });
     res.json({ message: "השירות נמחק בהצלחה" });
   } catch (error) {
@@ -551,16 +567,11 @@ exports.createProvider = async (req, res) => {
       return res.status(400).json({ error: "שם הספר הוא שדה חובה" });
     }
 
-    const businessId = await getTargetBusinessId(req.user?.id);
-    if (!businessId) {
-      return res.status(400).json({ error: "לא נמצא עסק מקושר" });
-    }
-
     const provider = await prisma.provider.create({
       data: {
         name,
         imageUrl: imageUrl || null,
-        businessId,
+        businessId: req.business.id,
       },
     });
 
@@ -574,6 +585,12 @@ exports.createProvider = async (req, res) => {
 exports.deleteProvider = async (req, res) => {
   try {
     const { id } = req.params;
+    const existing = await prisma.provider.findFirst({
+      where: { id, businessId: req.business.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "הספר לא נמצא" });
+    }
     await prisma.provider.delete({ where: { id } });
     res.json({ message: "הספר הוסר בהצלחה" });
   } catch (error) {
@@ -609,11 +626,8 @@ exports.getActiveBroadcast = async (req, res) => {
 // שליפת כל ההודעות (למנהל)
 exports.getAllBroadcasts = async (req, res) => {
   try {
-    const businessId = await getTargetBusinessId(req.user?.id);
     const broadcasts = await prisma.broadcast.findMany({
-      where: {
-        ...(businessId && { businessId }),
-      },
+      where: { businessId: req.business.id },
       orderBy: { createdAt: "desc" },
     });
     res.json(broadcasts);
@@ -627,21 +641,15 @@ exports.getAllBroadcasts = async (req, res) => {
 exports.createBroadcast = async (req, res) => {
   try {
     const { message } = req.body;
-    const currentUserId = req.user?.id || req.user?.userId;
 
     if (!message || !message.trim()) {
       return res.status(400).json({ error: "תוכן ההודעה אינו יכול להיות ריק" });
     }
 
-    const businessId = await getTargetBusinessId(currentUserId);
-    if (!businessId) {
-      return res.status(400).json({ error: "לא נמצא עסק מקושר" });
-    }
-
     const broadcast = await prisma.broadcast.create({
       data: {
         message: message.trim(),
-        businessId,
+        businessId: req.business.id,
         isActive: true,
       },
     });
@@ -657,6 +665,12 @@ exports.createBroadcast = async (req, res) => {
 exports.deleteBroadcast = async (req, res) => {
   try {
     const { id } = req.params;
+    const existing = await prisma.broadcast.findFirst({
+      where: { id, businessId: req.business.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "ההודעה לא נמצאה" });
+    }
     await prisma.broadcast.delete({ where: { id } });
     res.json({ message: "ההודעה נמחקה בהצלחה" });
   } catch (error) {
@@ -677,6 +691,7 @@ exports.getBusinessStats = async (req, res) => {
 
     const todayAppointments = await prisma.appointment.findMany({
       where: {
+        businessId: req.business.id,
         dateTime: { gte: startOfToday, lte: endOfToday },
       },
       include: { service: true },
@@ -694,9 +709,12 @@ exports.getBusinessStats = async (req, res) => {
       .filter((a) => a.status !== "CANCELLED")
       .reduce((sum, a) => sum + (a.service?.price || 0), 0);
 
-    const totalClients = await prisma.user.count({
-      where: { role: "CLIENT" },
+    // אין businessId על User, אז סופרים לקוחות ייחודיים מתוך התורים של העסק הזה בלבד
+    const distinctClients = await prisma.appointment.groupBy({
+      by: ["userId"],
+      where: { businessId: req.business.id },
     });
+    const totalClients = distinctClients.length;
 
     res.json({
       totalToday,
@@ -708,5 +726,278 @@ exports.getBusinessStats = async (req, res) => {
   } catch (error) {
     console.error("Error calculating stats:", error);
     res.status(500).json({ error: "שגיאה בשליפת סטטיסטיקות" });
+  }
+};
+
+// שליפת יומן תורים/זמינות לעסק שאותר לפי slug (שלב 5 - השחלת slug לפרונט)
+exports.getBusinessAppointmentsBySlug = async (req, res) => {
+  try {
+    const { date, providerId } = req.query;
+    const whereClause = { businessId: req.business.id };
+
+    if (date) {
+      const startOfDay = new Date(`${date}T00:00:00.000Z`);
+      const endOfDay = new Date(`${date}T23:59:59.999Z`);
+      whereClause.dateTime = { gte: startOfDay, lte: endOfDay };
+    }
+
+    if (providerId) {
+      whereClause.providerId = providerId;
+    }
+
+    const appointments = await prisma.appointment.findMany({
+      where: whereClause,
+      include: {
+        user: {
+          select: { id: true, firstName: true, lastName: true, phone: true },
+        },
+        provider: { select: { id: true, name: true, imageUrl: true } },
+        service: {
+          select: { id: true, name: true, price: true, durationMin: true },
+        },
+      },
+      orderBy: { dateTime: "asc" },
+    });
+
+    res.json(appointments);
+  } catch (error) {
+    console.error("Error fetching business appointments by slug:", error);
+    res.status(500).json({ error: "שגיאה בשליפת יומן התורים" });
+  }
+};
+
+// שליפת הגדרות שעות פעילות לעסק שאותר לפי slug
+exports.getBusinessSettingsBySlug = async (req, res) => {
+  try {
+    const business = await prisma.business.findUnique({
+      where: { id: req.business.id },
+      select: {
+        openTime: true,
+        closeTime: true,
+        slotInterval: true,
+        bookingOpenUntil: true,
+      },
+    });
+
+    res.json({
+      openTime: business?.openTime || "09:00",
+      closeTime: business?.closeTime || "19:30",
+      slotInterval: Number(business?.slotInterval) || 30,
+      bookingOpenUntil: business?.bookingOpenUntil || null,
+    });
+  } catch (error) {
+    console.error("Error fetching business settings by slug:", error);
+    res.status(500).json({ error: "שגיאה בשליפת הגדרות העסק" });
+  }
+};
+
+// שליפת ימים חסומים לעסק שאותר לפי slug
+exports.getBlockedDaysBySlug = async (req, res) => {
+  try {
+    const { date } = req.query;
+    const whereClause = { businessId: req.business.id };
+    if (date) whereClause.date = date;
+
+    const blockedDays = await prisma.blockedDay.findMany({
+      where: whereClause,
+      include: {
+        provider: { select: { id: true, name: true } },
+      },
+    });
+
+    res.json(blockedDays);
+  } catch (error) {
+    console.error("Error fetching blocked days by slug:", error);
+    res.status(500).json({ error: "שגיאה בשליפת ימים חסומים" });
+  }
+};
+
+// שליפת הודעת שידור פעילה לעסק שאותר לפי slug
+exports.getActiveBroadcastBySlug = async (req, res) => {
+  try {
+    const broadcast = await prisma.broadcast.findFirst({
+      where: { businessId: req.business.id, isActive: true },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(broadcast || null);
+  } catch (error) {
+    console.error("Error fetching active broadcast by slug:", error);
+    res.status(500).json({ error: "שגיאה בשליפת הודעת מערכת" });
+  }
+};
+
+// ==========================================
+// 6. ניהול פרופיל העסק (Business Profile)
+// ==========================================
+
+// שליפת שירותים השייכים אך ורק לעסק שאותר לפי slug
+exports.getBusinessServices = async (req, res) => {
+  try {
+    const services = await prisma.service.findMany({
+      where: { businessId: req.business.id },
+      orderBy: { price: "asc" },
+    });
+    res.json(services);
+  } catch (error) {
+    console.error("Error fetching business services:", error);
+    res.status(500).json({ error: "שגיאה בשליפת שירותים" });
+  }
+};
+
+// שליפת ספרים/אנשי צוות השייכים אך ורק לעסק שאותר לפי slug
+exports.getBusinessProviders = async (req, res) => {
+  try {
+    const providers = await prisma.provider.findMany({
+      where: { businessId: req.business.id },
+      orderBy: { name: "asc" },
+    });
+    res.json(providers);
+  } catch (error) {
+    console.error("Error fetching business providers:", error);
+    res.status(500).json({ error: "שגיאה בשליפת ספרים" });
+  }
+};
+
+exports.getPublicProfile = (req, res) => {
+  const b = req.business;
+  res.json({
+    id: b.id,
+    slug: b.slug,
+    name: b.name,
+    address: b.address,
+    description: b.description,
+    logoUrl: b.logoUrl,
+    phone: b.phone,
+    whatsapp: b.whatsapp,
+    instagram: b.instagram,
+    tiktok: b.tiktok,
+    openTime: b.openTime,
+    closeTime: b.closeTime,
+    slotInterval: b.slotInterval,
+    bookingOpenUntil: b.bookingOpenUntil,
+  });
+};
+
+// שליפת נתוני העסק כמו שהם ב-DB
+exports.getBusinessProfile = async (req, res) => {
+  try {
+    const targetBusinessId = await getTargetBusinessId(req.user?.id);
+    const business = targetBusinessId
+      ? await prisma.business.findUnique({ where: { id: targetBusinessId } })
+      : null;
+    res.status(200).json(business || null);
+  } catch (error) {
+    console.error("Error fetching business profile:", error);
+    res.status(500).json({ error: "שגיאה בשליפת נתוני העסק" });
+  }
+};
+
+// ==========================================
+// 7. הרשמת עסקים חדשים (Onboarding - שלב 6)
+// ==========================================
+
+// בדיקת זמינות slug בלייב (לטופס ההרשמה בפרונט)
+exports.checkSlugAvailability = async (req, res) => {
+  try {
+    const { slug } = req.query;
+
+    if (!slug || !isValidSlugFormat(slug)) {
+      return res.json({ available: false, reason: "invalid" });
+    }
+    if (RESERVED_SLUGS.includes(slug)) {
+      return res.json({ available: false, reason: "reserved" });
+    }
+
+    const existing = await prisma.business.findUnique({ where: { slug } });
+    res.json({ available: !existing, reason: existing ? "taken" : undefined });
+  } catch (error) {
+    console.error("Error checking slug availability:", error);
+    res.status(500).json({ error: "שגיאה בבדיקת זמינות הכתובת" });
+  }
+};
+
+// יצירת עסק חדש למשתמש מחובר (הופך אותו ל-ADMIN) ומנפיק טוקן חדש
+exports.registerBusiness = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+    const { slug, name, address } = req.body;
+
+    if (!slug || !name || !name.trim()) {
+      return res.status(400).json({ error: "חסרים שם עסק וכתובת URL" });
+    }
+    if (!isValidSlugFormat(slug)) {
+      return res.status(400).json({ error: "כתובת ה-URL אינה תקינה" });
+    }
+    if (RESERVED_SLUGS.includes(slug)) {
+      return res.status(400).json({ error: "כתובת ה-URL הזו שמורה ואינה זמינה" });
+    }
+
+    // v1: כל owner מנהל עסק יחיד בלבד
+    const existingBusiness = await prisma.business.findFirst({
+      where: { ownerId: userId },
+    });
+    if (existingBusiness) {
+      return res.status(400).json({ error: "כבר קיים עסק רשום תחת המשתמש שלך" });
+    }
+
+    let business;
+    try {
+      business = await prisma.business.create({
+        data: { slug, name: name.trim(), address: address || null, ownerId: userId },
+      });
+    } catch (err) {
+      // race condition: שני משתמשים תפסו את אותו slug בו-זמנית - ה-DB הוא קו ההגנה האמיתי
+      if (err.code === "P2002") {
+        return res.status(400).json({ error: "כתובת ה-URL הזו כבר תפוסה, נסה אחרת" });
+      }
+      throw err;
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: { role: "ADMIN" },
+    });
+
+    // הטוקן הישן נושא role: "CLIENT" - חייבים להנפיק טוקן חדש כדי ש-requireAdmin יעבוד מעכשיו
+    const token = jwt.sign(
+      { userId: updatedUser.id, role: updatedUser.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "30d" },
+    );
+
+    res.status(201).json({
+      token,
+      user: {
+        id: updatedUser.id,
+        phone: updatedUser.phone,
+        firstName: updatedUser.firstName,
+        lastName: updatedUser.lastName,
+        role: updatedUser.role,
+        isNewUser: false,
+      },
+      business,
+    });
+  } catch (error) {
+    console.error("Error registering business:", error);
+    res.status(500).json({ error: "שגיאה ברישום העסק" });
+  }
+};
+
+// עדכון נתוני העסק ישירות ממה שהוזן בטופס
+exports.updateBusinessProfile = async (req, res) => {
+  try {
+    const { name, address, phone, whatsapp, instagram, tiktok } = req.body;
+
+    // req.business הוצמד ע"י resolveOwnedBusiness - קיומו כבר מובטח (אחרת 404 קרה קודם).
+    // יצירת עסק ראשון למנהל חדש עברה לתהליך הרשמה ייעודי (שלב 6 בתוכנית), לא כאן יותר.
+    const business = await prisma.business.update({
+      where: { id: req.business.id },
+      data: { name, address, phone, whatsapp, instagram, tiktok },
+    });
+
+    res.status(200).json({ message: "הפרופיל עודכן בהצלחה", business });
+  } catch (error) {
+    console.error("Error updating business profile:", error);
+    res.status(500).json({ error: "שגיאה בעדכון הפרופיל" });
   }
 };

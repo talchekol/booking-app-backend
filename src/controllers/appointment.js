@@ -12,10 +12,12 @@ const createAppointment = async (req, res) => {
 
     const parsedDateTime = new Date(dateTime);
 
-    // בדיקה שלמשתמש אין כבר תור עתידי פעיל
+    // בדיקה שלמשתמש אין כבר תור עתידי פעיל - ברמת העסק הזה בלבד, כי משתמש
+    // יכול להזמין אצל כמה עסקים שונים במקביל
     const existingUpcoming = await prisma.appointment.findFirst({
       where: {
         userId,
+        businessId,
         status: "CONFIRMED",
         dateTime: { gte: new Date() },
       },
@@ -37,11 +39,9 @@ const createAppointment = async (req, res) => {
     });
 
     if (conflictingAppointment) {
-      return res
-        .status(409)
-        .json({
-          error: "המועד הזה כבר תפוס אצל הספק הנבחר, יש לבחור מועד אחר",
-        });
+      return res.status(409).json({
+        error: "המועד הזה כבר תפוס אצל הספק הנבחר, יש לבחור מועד אחר",
+      });
     }
 
     const appointment = await prisma.appointment.create({
@@ -166,7 +166,7 @@ const toggleSwapOffer = async (req, res) => {
 
       if (newSwapState) {
         await tx.swapOffer.create({
-          data: { appointmentId },
+          data: { appointmentId, businessId: appointment.businessId },
         });
       } else {
         await tx.swapOffer.deleteMany({
@@ -186,9 +186,11 @@ const toggleSwapOffer = async (req, res) => {
 const getAvailableSwaps = async (req, res) => {
   try {
     const userId = req.user.userId || req.user.id;
+    const { businessId } = req.query;
 
     const offers = await prisma.swapOffer.findMany({
       where: {
+        ...(businessId && { businessId }),
         appointment: {
           userId: { not: userId },
           dateTime: { gte: new Date() },
@@ -253,6 +255,13 @@ const requestSwap = async (req, res) => {
         .json({ error: "עליך להציע את התור שלך להחלפה תחילה" });
     }
 
+    // אבטחת מולטי-טננט: לא ניתן להחליף תורים בין עסקים שונים
+    if (offeredAppointment.businessId !== swapOffer.appointment.businessId) {
+      return res
+        .status(400)
+        .json({ error: "לא ניתן להחליף תורים בין עסקים שונים" });
+    }
+
     const existing = await prisma.swapRequest.findFirst({
       where: { swapOfferId, requesterId: userId, status: "PENDING" },
     });
@@ -268,6 +277,7 @@ const requestSwap = async (req, res) => {
         ownerId: swapOffer.appointment.userId,
         offeredAppointmentId,
         ownerAppointmentId: swapOffer.appointmentId,
+        businessId: swapOffer.appointment.businessId,
       },
     });
 
@@ -282,10 +292,11 @@ const requestSwap = async (req, res) => {
 const getMySwapRequests = async (req, res) => {
   try {
     const userId = req.user.userId || req.user.id;
+    const { businessId } = req.query;
 
     const [incoming, outgoing] = await Promise.all([
       prisma.swapRequest.findMany({
-        where: { ownerId: userId },
+        where: { ownerId: userId, ...(businessId && { businessId }) },
         include: {
           requester: { select: { id: true, firstName: true, phone: true } },
           offeredAppointment: {
@@ -299,7 +310,7 @@ const getMySwapRequests = async (req, res) => {
         take: 10,
       }),
       prisma.swapRequest.findMany({
-        where: { requesterId: userId },
+        where: { requesterId: userId, ...(businessId && { businessId }) },
         include: {
           owner: { select: { id: true, firstName: true, phone: true } },
           offeredAppointment: {
@@ -324,9 +335,11 @@ const getMySwapRequests = async (req, res) => {
 // 8. אישור בקשת החלפה - החלפת בעלים אטומית ומדויקת
 const approveSwapRequest = async (req, res) => {
   try {
+    // 1. בדיקה אם הבקשה קיימת, ממתינה, והמשתמש הוא המאשר
     const currentUserId = req.user.userId || req.user.id;
     const { requestId } = req.params;
 
+    // 2. שליפת הבקשה עם התורים המעורבים
     const swapRequest = await prisma.swapRequest.findUnique({
       where: { id: requestId },
       include: {
@@ -335,6 +348,7 @@ const approveSwapRequest = async (req, res) => {
       },
     });
 
+    // 3. בדיקה אם הבקשה קיימת, ממתינה, והמשתמש הוא המאשר
     if (!swapRequest || swapRequest.status !== "PENDING") {
       return res
         .status(404)
@@ -344,6 +358,7 @@ const approveSwapRequest = async (req, res) => {
     const apptA = swapRequest.ownerAppointment; // התור של המאשר
     const apptB = swapRequest.offeredAppointment; // התור של המבקש
 
+    // 4. בדיקה אם התורים קיימים
     if (!apptA || !apptB) {
       return res.status(400).json({ error: "אחד התורים לא נמצא במערכת" });
     }
@@ -352,9 +367,19 @@ const approveSwapRequest = async (req, res) => {
       return res.status(403).json({ error: "אינך מורשה לאשר בקשה זו" });
     }
 
+    // הגנה כפולה: לא לבצע החלפה בפועל בין תורים משני עסקים שונים
+    // (גם אם משום מה נוצרה בקשה כזו לפני requestSwap, לא ניתן לאשר אותה)
+    if (apptA.businessId !== apptB.businessId) {
+      return res
+        .status(400)
+        .json({ error: "לא ניתן להחליף תורים בין עסקים שונים" });
+    }
+
+    // 5. בדיקה אם התורים עדיין מאושרים ופעילים
     const userA_Id = apptA.userId;
     const userB_Id = apptB.userId;
 
+    // 6. ביצוע החלפת הבעלים של התורים בצורה אטומית
     await prisma.$transaction([
       // 1. עדכון סטטוס הבקשה למאושרת
       prisma.swapRequest.update({

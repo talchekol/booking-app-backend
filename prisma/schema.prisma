@@ -41,7 +41,12 @@ model VerificationCode {
 model Business {
   id          String   @id @default(uuid())
   name        String
-  address     String?
+  slug        String   @unique
+  address      String?       // ריק עד שבעל העסק מזין
+  phone        String?       // ריק עד שבעל העסק מזין
+  whatsapp     String?       // ריק עד שבעל העסק מזין
+  instagram    String?       // ריק עד שבעל העסק מזין
+  tiktok       String?       // ריק עד שבעל העסק מזין
   description String?
   logoUrl     String?
   ownerId     String
@@ -61,6 +66,8 @@ model Business {
   blockedDays  BlockedDay[]
   reviews      Review[]
   broadcasts   Broadcast[]
+  swapOffers   SwapOffer[]
+  swapRequests SwapRequest[]
   createdAt    DateTime      @default(now())
 }
 
@@ -74,6 +81,8 @@ model Provider {
 
   appointments Appointment[]
   blockedDays  BlockedDay[]
+
+  @@index([businessId])
 }
 
 // 5. שירותים ומחירים
@@ -86,6 +95,8 @@ model Service {
   business    Business @relation(fields: [businessId], references: [id])
 
   appointments Appointment[]
+
+  @@index([businessId])
 }
 
 // 6. התורים עצמם
@@ -112,6 +123,8 @@ model Appointment {
   ownerInRequests  SwapRequest[] @relation("OwnerAppointment")
 
   createdAt DateTime @default(now())
+
+  @@index([businessId])
 }
 
 enum AppointmentStatus {
@@ -126,9 +139,14 @@ model SwapOffer {
   id            String      @id @default(uuid())
   appointmentId String      @unique
   appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-  
+
+  businessId    String
+  business      Business    @relation(fields: [businessId], references: [id])
+
   requests      SwapRequest[]
   createdAt     DateTime    @default(now())
+
+  @@index([businessId])
 }
 
 // 8. בקשות החלפה בין משתמשים
@@ -155,8 +173,13 @@ model SwapRequest {
   ownerAppointmentId   String
   ownerAppointment     Appointment       @relation("OwnerAppointment", fields: [ownerAppointmentId], references: [id])
 
+  businessId           String
+  business             Business          @relation(fields: [businessId], references: [id])
+
   status               SwapRequestStatus @default(PENDING)
   createdAt            DateTime          @default(now())
+
+  @@index([businessId])
 }
 
 enum SwapRequestStatus {
@@ -175,6 +198,8 @@ model BlockedDay {
   providerId String?  // אם null = כל העסק סגור, אם יש ID = הספר הספציפי חופש
   provider   Provider? @relation(fields: [providerId], references: [id], onDelete: Cascade)
   createdAt  DateTime @default(now())
+
+  @@index([businessId])
 }
 
 //  הודעות מערכת ועדכונים של בעל העסק ללקוחות 👈 (נוסף)
@@ -185,6 +210,8 @@ model Broadcast {
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   createdAt  DateTime @default(now())
+
+  @@index([businessId])
 }
 
 // 9. ביקורות ודירוגים

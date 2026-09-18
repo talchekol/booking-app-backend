@@ -2,10 +2,116 @@ const express = require("express");
 const router = express.Router();
 const businessController = require("../controllers/business");
 const { authenticateToken, requireAdmin } = require("../middleware/auth");
+const { resolveBusinessBySlug, resolveOwnedBusiness } = require("../middleware/tenant");
+
+// שליפת שירותים/ספרים של העסק שלי (מזוהה מהטוקן) - לשימוש פנימי בפאנל הניהול.
+// מוגדר *לפני* בלוק ה-:slug למטה בכוונה: "/:slug/services" הוא תבנית שתופסת כל
+// ערך (כולל "my"), אז אם זה היה נרשם אחרי, "/business/my/services" היה נתפס
+// בטעות ע"י "/:slug/services" עם slug="my" (עסק לא קיים) ומחזיר 404 - זה בדיוק
+// הבאג שתפסנו ותיקנו. מידלוור המנהל מוצמד כאן ישירות כי השער הגלובלי
+// (authenticateToken/requireAdmin/resolveOwnedBusiness) מופעל רק החל משורה מאוחרת יותר.
+router.get(
+  "/my/services",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.getBusinessServices,
+);
+router.get(
+  "/my/providers",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.getBusinessProviders,
+);
+router.get(
+  "/my/appointments",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.getBusinessAppointmentsBySlug,
+);
+router.get(
+  "/my/blocked-days",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.getBlockedDaysBySlug,
+);
+router.get(
+  "/my/settings",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.getBusinessSettingsBySlug,
+);
+// פרופיל העסק שלי - מזוהה מהטוקן (מחליף את השימוש השגוי ב-GET /profile הציבורי/
+// הלא-מאומת, שהשתמש ב-req.user?.id שאף פעם לא קיים כי ה-JWT נושא userId בלבד)
+router.get(
+  "/my/profile",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.getPublicProfile,
+);
+
+// ==========================================
+// 0.5 הרשמת עסקים חדשים (שלב 6) - נתיבים ליטרליים,
+// חייבים להירשם לפני בלוק ה-":slug" למטה מאותה סיבה בדיוק כמו "/my/..."
+// ==========================================
+router.get("/check-slug", businessController.checkSlugAvailability);
+router.post("/register", authenticateToken, businessController.registerBusiness);
+
+// ==========================================
+// 0. פרוסה מינימלית אנכית - מולטי-טננט (שלב 2)
+// ==========================================
+
+// פרופיל ציבורי לפי slug - הנתיב הראשון שבודק שבידוד לפי עסק עובד קצה-לקצה
+router.get(
+  "/:slug/profile",
+  resolveBusinessBySlug,
+  businessController.getPublicProfile,
+);
+
+// קטלוג שירותים וספרים מבודד לפי slug
+router.get(
+  "/:slug/services",
+  resolveBusinessBySlug,
+  businessController.getBusinessServices,
+);
+router.get(
+  "/:slug/providers",
+  resolveBusinessBySlug,
+  businessController.getBusinessProviders,
+);
+router.get(
+  "/:slug/appointments",
+  resolveBusinessBySlug,
+  businessController.getBusinessAppointmentsBySlug,
+);
+router.get(
+  "/:slug/blocked-days",
+  resolveBusinessBySlug,
+  businessController.getBlockedDaysBySlug,
+);
+router.get(
+  "/:slug/settings",
+  resolveBusinessBySlug,
+  businessController.getBusinessSettingsBySlug,
+);
+router.get(
+  "/:slug/broadcasts/active",
+  resolveBusinessBySlug,
+  businessController.getActiveBroadcastBySlug,
+);
 
 // ==========================================
 // 1. נתיבים פתוחים וציבוריים (גם ללקוח וגם למנהל)
 // ==========================================
+
+// פרופיל ופרטי העסק (שם, כתובת, טלפון, סושיאל)
+router.get("/profile", businessController.getBusinessProfile);
+
 router.get("/services", businessController.getServices);
 router.get("/providers", businessController.getProviders);
 
@@ -22,12 +128,16 @@ router.get("/broadcasts/active", businessController.getActiveBroadcast);
 // ==========================================
 router.use(authenticateToken);
 router.use(requireAdmin);
+router.use(resolveOwnedBusiness);
 
 // עדכון סטטוס תור ביומן
 router.patch(
   "/appointments/:id/status",
   businessController.updateAppointmentStatus,
 );
+
+// עדכון פרופיל העסק (למנהל בלבד)
+router.put("/profile", businessController.updateBusinessProfile);
 
 // הוספת וביטול חסימות יום
 router.post("/blocked-days", businessController.blockFullDay);
