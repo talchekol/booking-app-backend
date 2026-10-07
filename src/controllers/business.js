@@ -1,6 +1,12 @@
 const prisma = require("../config/prisma");
 const jwt = require("jsonwebtoken");
 const { RESERVED_SLUGS, isValidSlugFormat } = require("../utils/reservedSlugs");
+const {
+  getNextUnpublishedWeek,
+  parseDateOnly,
+  addDaysUTC,
+  formatDateOnly,
+} = require("../utils/weekUtils");
 
 // פונקציית עזר לשליפת businessId
 // הדירוג לפי createdAt מבטיח שאם קיימות כמה רשומות עסק לאותו בעלים (למשל בגלל seed כפול),
@@ -313,14 +319,15 @@ exports.blockTimeRange = async (req, res) => {
       },
     });
 
-    // יצירת רשומות החסימה במכה אחת
+    // יצירת רשומות החסימה במכה אחת - Appointment.userId הוא שדה חובה (לא
+    // nullable), אז משייכים את רשומת החסימה למנהל שביצע אותה (req.user.userId)
     const records = providerIds.map((pId) => ({
       dateTime: blockStartDateTime,
       status: "CONFIRMED",
       businessId,
       providerId: pId,
       serviceId: blockService.id,
-      userId: currentUserId || null,
+      userId: req.user.userId,
     }));
 
     await prisma.appointment.createMany({
@@ -685,9 +692,10 @@ exports.deleteBroadcast = async (req, res) => {
 
 exports.getBusinessStats = async (req, res) => {
   try {
-    const today = new Date();
-    const startOfToday = new Date(today.setHours(0, 0, 0, 0));
-    const endOfToday = new Date(today.setHours(23, 59, 59, 999));
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
 
     const todayAppointments = await prisma.appointment.findMany({
       where: {
@@ -698,9 +706,10 @@ exports.getBusinessStats = async (req, res) => {
     });
 
     const totalToday = todayAppointments.length;
-    const completedToday = todayAppointments.filter(
+    const completedTodayList = todayAppointments.filter(
       (a) => a.status === "COMPLETED",
-    ).length;
+    );
+    const completedToday = completedTodayList.length;
     const cancelledToday = todayAppointments.filter(
       (a) => a.status === "CANCELLED",
     ).length;
@@ -709,23 +718,152 @@ exports.getBusinessStats = async (req, res) => {
       .filter((a) => a.status !== "CANCELLED")
       .reduce((sum, a) => sum + (a.service?.price || 0), 0);
 
-    // אין businessId על User, אז סופרים לקוחות ייחודיים מתוך התורים של העסק הזה בלבד
+    // הכנסה בפועל = רק תורים שכבר סומנו כ"הושלם" (לא רק "צפוי")
+    const actualRevenueToday = completedTodayList.reduce(
+      (sum, a) => sum + (a.service?.price || 0),
+      0,
+    );
+
+    // אין businessId על User, אז סופרים לקוחות ייחודיים מתוך התורים של העסק הזה
+    // בלבד - מחריגים רשומות "חסום: ..." כדי שבעל העסק עצמו (שרשומות החסימה
+    // מוצמדות אליו) לא ייספר בטעות כאחד "הלקוחות"
     const distinctClients = await prisma.appointment.groupBy({
       by: ["userId"],
-      where: { businessId: req.business.id },
+      where: {
+        businessId: req.business.id,
+        NOT: { service: { name: { startsWith: "חסום" } } },
+      },
     });
     const totalClients = distinctClients.length;
+
+    // 7 הימים האחרונים (כולל היום) - הכנסה יומית מתורים שאינם מבוטלים
+    const sevenDaysAgo = new Date(startOfToday);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+    const weekAppointments = await prisma.appointment.findMany({
+      where: {
+        businessId: req.business.id,
+        dateTime: { gte: sevenDaysAgo, lte: endOfToday },
+        status: { not: "CANCELLED" },
+      },
+      include: { service: true },
+    });
+
+    const DAY_LABELS = ["א", "ב", "ג", "ד", "ה", "ו", "ש"];
+    const last7Days = [];
+    for (let i = 6; i >= 0; i--) {
+      const dayStart = new Date(startOfToday);
+      dayStart.setDate(dayStart.getDate() - i);
+      const dayEnd = new Date(dayStart);
+      dayEnd.setHours(23, 59, 59, 999);
+
+      const revenue = weekAppointments
+        .filter((a) => a.dateTime >= dayStart && a.dateTime <= dayEnd)
+        .reduce((sum, a) => sum + (a.service?.price || 0), 0);
+
+      last7Days.push({
+        day: i === 0 ? "היום" : DAY_LABELS[dayStart.getDay()],
+        date: dayStart.toISOString().slice(0, 10),
+        revenue,
+      });
+    }
 
     res.json({
       totalToday,
       completedToday,
       cancelledToday,
       expectedRevenueToday,
+      actualRevenueToday,
       totalClients,
+      last7Days,
     });
   } catch (error) {
     console.error("Error calculating stats:", error);
     res.status(500).json({ error: "שגיאה בשליפת סטטיסטיקות" });
+  }
+};
+
+// ==========================================
+// 9. פרסום תורים שבועי (ראשון-שבת)
+// ==========================================
+
+// סטטוס הפרסום הנוכחי + השבוע הקרוב שעדיין לא פורסם (לתצוגת "מתי אפרסם הלאה")
+exports.getWeekPublishStatus = async (req, res) => {
+  try {
+    const { today } = req.query;
+    const { weekStart, weekEnd } = getNextUnpublishedWeek(
+      req.business.bookingOpenUntil,
+      today,
+    );
+    res.json({
+      bookingOpenUntil: req.business.bookingOpenUntil || null,
+      nextWeekStart: weekStart,
+      nextWeekEnd: weekEnd,
+    });
+  } catch (error) {
+    console.error("Error getting week publish status:", error);
+    res.status(500).json({ error: "שגיאה בשליפת סטטוס פרסום" });
+  }
+};
+
+// פרסום השבוע הקרוב שעדיין לא פורסם - מעדכן את bookingOpenUntil ליום שבת שלו
+exports.publishWeek = async (req, res) => {
+  try {
+    const { today } = req.body || {};
+    const { weekStart, weekEnd } = getNextUnpublishedWeek(
+      req.business.bookingOpenUntil,
+      today,
+    );
+
+    const updated = await prisma.business.update({
+      where: { id: req.business.id },
+      data: { bookingOpenUntil: weekEnd },
+    });
+
+    res.json({
+      message: "התורים לשבוע פורסמו בהצלחה",
+      weekStart,
+      weekEnd,
+      bookingOpenUntil: updated.bookingOpenUntil,
+    });
+  } catch (error) {
+    console.error("Error publishing week:", error);
+    res.status(500).json({ error: "שגיאה בפרסום השבוע" });
+  }
+};
+
+// ביטול פרסום השבוע האחרון שפורסם - מזיז את bookingOpenUntil שבוע אחורה.
+// אפשר לבטל רק את השבוע *האחרון* שפורסם (כי bookingOpenUntil הוא קו-חיתוך
+// יחיד, לא רשימת שבועות בנפרד) - זה בדיוק תואם את התרחיש "פרסמתי פעמיים
+// ברצף בטעות" - מבטלים את הפעולה האחרונה, לא שבוע כלשהו מהאמצע.
+exports.unpublishLastWeek = async (req, res) => {
+  try {
+    const { today } = req.body || {};
+
+    if (!req.business.bookingOpenUntil) {
+      return res.status(400).json({ error: "אין שבוע מפורסם לביטול" });
+    }
+
+    const rolledBack = addDaysUTC(
+      parseDateOnly(req.business.bookingOpenUntil),
+      -7,
+    );
+    const todayDate = parseDateOnly(today || formatDateOnly(new Date()));
+    // אם אחרי הביטול לא נשאר בפועל שום שבוע מפורסם (התאריך כבר עבר) - מאפסים
+    // לגמרי במקום להשאיר תאריך "תקוע" בעבר
+    const newValue = rolledBack < todayDate ? null : formatDateOnly(rolledBack);
+
+    const updated = await prisma.business.update({
+      where: { id: req.business.id },
+      data: { bookingOpenUntil: newValue },
+    });
+
+    res.json({
+      message: "פרסום השבוע בוטל בהצלחה",
+      bookingOpenUntil: updated.bookingOpenUntil,
+    });
+  } catch (error) {
+    console.error("Error unpublishing week:", error);
+    res.status(500).json({ error: "שגיאה בביטול הפרסום" });
   }
 };
 
@@ -855,6 +993,112 @@ exports.getBusinessProviders = async (req, res) => {
   } catch (error) {
     console.error("Error fetching business providers:", error);
     res.status(500).json({ error: "שגיאה בשליפת ספרים" });
+  }
+};
+
+// שליפת כל הצעות ההחלפה הפעילות של העסק שלי (תצוגת מנהל, ללא החרגת משתמש)
+exports.getBusinessSwapOffers = async (req, res) => {
+  try {
+    const offers = await prisma.swapOffer.findMany({
+      where: {
+        businessId: req.business.id,
+        appointment: { status: "CONFIRMED", dateTime: { gte: new Date() } },
+      },
+      include: {
+        appointment: {
+          include: {
+            user: {
+              select: { id: true, firstName: true, lastName: true, phone: true },
+            },
+            provider: { select: { id: true, name: true, imageUrl: true } },
+            service: {
+              select: { id: true, name: true, price: true, durationMin: true },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(offers);
+  } catch (error) {
+    console.error("Error fetching business swap offers:", error);
+    res.status(500).json({ error: "שגיאה בשליפת שוק ההחלפות" });
+  }
+};
+
+// ==========================================
+// 8. ביקורות (Reviews)
+// ==========================================
+
+// שליפת ביקורות העסק - פתוח לכולם (מסך הבית של הלקוח)
+exports.getBusinessReviews = async (req, res) => {
+  try {
+    const reviews = await prisma.review.findMany({
+      where: { businessId: req.business.id },
+      include: { user: { select: { firstName: true, lastName: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+    res.json(reviews);
+  } catch (error) {
+    console.error("Error fetching reviews:", error);
+    res.status(500).json({ error: "שגיאה בשליפת ביקורות" });
+  }
+};
+
+// יצירת ביקורת חדשה - דורש משתמש מחובר
+exports.createReview = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+    const { rating, comment } = req.body;
+    const numRating = parseInt(rating, 10);
+
+    if (!numRating || numRating < 1 || numRating > 5 || !comment?.trim()) {
+      return res
+        .status(400)
+        .json({ error: "יש לצרף דירוג (1-5) ותוכן ביקורת" });
+    }
+
+    const review = await prisma.review.create({
+      data: {
+        rating: numRating,
+        comment: comment.trim(),
+        userId,
+        businessId: req.business.id,
+      },
+      include: { user: { select: { firstName: true, lastName: true } } },
+    });
+
+    res.status(201).json(review);
+  } catch (error) {
+    console.error("Error creating review:", error);
+    res.status(500).json({ error: "שגיאה בשמירת הביקורת" });
+  }
+};
+
+// מחיקת ביקורת - רק הלקוח שכתב אותה יכול למחוק את שלו
+exports.deleteReview = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+    const { id } = req.params;
+
+    const existing = await prisma.review.findFirst({
+      where: { id, businessId: req.business.id },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: "הביקורת לא נמצאה" });
+    }
+
+    if (existing.userId !== userId) {
+      return res.status(403).json({ error: "ניתן למחוק רק את הביקורת שלך" });
+    }
+
+    await prisma.review.delete({ where: { id } });
+    res.json({ message: "הביקורת נמחקה בהצלחה" });
+  } catch (error) {
+    console.error("Error deleting review:", error);
+    res.status(500).json({ error: "שגיאה במחיקת הביקורת" });
   }
 };
 

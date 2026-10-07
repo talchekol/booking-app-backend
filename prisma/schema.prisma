@@ -125,6 +125,10 @@ model Appointment {
   createdAt DateTime @default(now())
 
   @@index([businessId])
+  // הערה: קיים גם אילוץ ייחודיות חלקי (partial unique index) על
+  // (providerId, dateTime) WHERE status != 'CANCELLED' - נמנע race condition
+  // בקביעת תורים. נוצר ידנית ב-SQL גולמי במיגרציה כי Prisma לא תומך באילוצים
+  // חלקיים בשפת הסכימה, ולכן הוא לא מיוצג כאן כ-@@unique.
 }
 
 enum AppointmentStatus {

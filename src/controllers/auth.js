@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const jwt = require("jsonwebtoken");
+const { sendVerificationCode, checkVerificationCode } = require("../config/sms");
 
 // הגבלת ניסיונות אימות קוד (למניעת brute-force) - נשמר בזיכרון בלבד
 // מפתח: מספר טלפון, ערך: { count, windowStart }
@@ -38,28 +39,9 @@ const sendSms = async (req, res) => {
     // איפוס מונה הניסיונות השגויים בכל בקשה לקוד חדש
     verifyAttempts.delete(phone);
 
-    // 👈 מחיקת קודי אימות ישנים של אותו טלפון לפני יצירת קוד חדש
-    await prisma.verificationCode.deleteMany({
-      where: { phone },
-    });
-
-    // ייצור קוד אקראי בן 4 ספרות
-    const generatedCode = Math.floor(1000 + Math.random() * 9000).toString();
-
-    // קוד תקף ל-5 דקות
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-
-    // שמירת הקוד בטבלת VerificationCode
-    await prisma.verificationCode.create({
-      data: {
-        phone,
-        code: generatedCode,
-        expiresAt,
-      },
-    });
-
-    // 💡 הדפסה לטרמינל (עד שנחבר ספק SMS אמיתי)
-    console.log(`📱 [SMS Simulation] Code for ${phone} is: ${generatedCode}`);
+    // שולח SMS אמיתי דרך Twilio Verify אם מוגדר ב-.env, אחרת נופל חזרה
+    // לסימולציה (קוד מודפס לטרמינל) - ראו src/config/sms.js
+    await sendVerificationCode(phone);
 
     res.status(200).json({ message: "קוד אימות נשלח בהצלחה" });
   } catch (error) {
@@ -83,20 +65,13 @@ const verifySms = async (req, res) => {
       });
     }
 
-    // חיפוש קוד האימות האחרון שנשלח לטלפון הזה
-    const verification = await prisma.verificationCode.findFirst({
-      where: { phone, code },
-      orderBy: { createdAt: "desc" },
-    });
+    // בדיקת הקוד - מול Twilio Verify אם מוגדר, אחרת מול טבלת VerificationCode
+    // (ראו src/config/sms.js)
+    const isValid = await checkVerificationCode(phone, code);
 
-    if (!verification) {
+    if (!isValid) {
       registerFailedAttempt(phone);
-      return res.status(400).json({ error: "קוד אימות שגוי" });
-    }
-
-    // בדיקה אם הקוד פג תוקף
-    if (new Date() > verification.expiresAt) {
-      return res.status(400).json({ error: "קוד האימות פג תוקף" });
+      return res.status(400).json({ error: "קוד אימות שגוי או פג תוקף" });
     }
 
     // חיפוש או יצירה של המשתמש בטבלת User

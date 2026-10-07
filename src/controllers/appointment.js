@@ -12,14 +12,39 @@ const createAppointment = async (req, res) => {
 
     const parsedDateTime = new Date(dateTime);
 
+    // אכיפת פרסום שבועי בצד השרת - זה היה קיים רק כבדיקה בצד הלקוח
+    // (SelectDateTime.jsx), כלומר ניתן היה לעקוף אותה לגמרי בקריאת API ישירה.
+    // בלי בדיקה כאן, "פרסום תורים שבועי" הוא רק אילוץ קוסמטי ב-UI ולא אכיפה
+    // אמיתית - כל תאריך היה ניתן להזמנה גם אם בעל העסק מעולם לא פרסם אותו.
+    const business = await prisma.business.findUnique({
+      where: { id: businessId },
+      select: { bookingOpenUntil: true },
+    });
+    const requestedDateStr =
+      typeof dateTime === "string" && dateTime.length >= 10
+        ? dateTime.slice(0, 10)
+        : parsedDateTime.toISOString().slice(0, 10);
+
+    if (
+      !business?.bookingOpenUntil ||
+      requestedDateStr > business.bookingOpenUntil
+    ) {
+      return res.status(400).json({
+        error: "היומן לתאריך זה טרם נפתח להזמנות ע״י בעל העסק",
+      });
+    }
+
     // בדיקה שלמשתמש אין כבר תור עתידי פעיל - ברמת העסק הזה בלבד, כי משתמש
-    // יכול להזמין אצל כמה עסקים שונים במקביל
+    // יכול להזמין אצל כמה עסקים שונים במקביל. מחריגים רשומות "חסום: ..." -
+    // אלה placeholder-ים פנימיים לחסימת משבצות (blockTimeRange), לא תורים
+    // אמיתיים של המשתמש, גם אם userId עליהם שייך לבעל העסק עצמו (ראו getMyAppointments)
     const existingUpcoming = await prisma.appointment.findFirst({
       where: {
         userId,
         businessId,
         status: "CONFIRMED",
         dateTime: { gte: new Date() },
+        NOT: { service: { name: { startsWith: "חסום" } } },
       },
     });
 
@@ -44,21 +69,35 @@ const createAppointment = async (req, res) => {
       });
     }
 
-    const appointment = await prisma.appointment.create({
-      data: {
-        dateTime: parsedDateTime,
-        userId,
-        businessId,
-        providerId,
-        serviceId,
-        status: "CONFIRMED",
-      },
-      include: {
-        provider: true,
-        service: true,
-        business: true,
-      },
-    });
+    let appointment;
+    try {
+      appointment = await prisma.appointment.create({
+        data: {
+          dateTime: parsedDateTime,
+          userId,
+          businessId,
+          providerId,
+          serviceId,
+          status: "CONFIRMED",
+        },
+        include: {
+          provider: true,
+          service: true,
+          business: true,
+        },
+      });
+    } catch (createError) {
+      // רשת הביטחון האמיתית מול race condition: שתי בקשות בו-זמניות יכולות
+      // שתיהן לעבור את בדיקת conflictingAppointment למעלה (שאינה אטומית)
+      // לפני שאחת מהן הספיקה להיכתב - אילוץ הייחודיות החלקי ב-DB (ראו מיגרציית
+      // add_appointment_slot_unique_index) תופס את זה ב-P2002
+      if (createError.code === "P2002") {
+        return res.status(409).json({
+          error: "המועד הזה כבר תפוס אצל הספק הנבחר, יש לבחור מועד אחר",
+        });
+      }
+      throw createError;
+    }
 
     res.status(201).json(appointment);
   } catch (error) {
@@ -72,8 +111,14 @@ const getMyAppointments = async (req, res) => {
   try {
     const userId = req.user.userId || req.user.id;
 
+    // מחריגים רשומות "חסום: ..." - אלה placeholder-ים פנימיים של חסימת
+    // משבצות (ראו blockTimeRange ב-business.js), לא תורים אמיתיים - אם
+    // המשתמש הזה גם בעל עסק, הן מוצמדות ל-userId שלו ולא אמורות להופיע כאן
     const appointments = await prisma.appointment.findMany({
-      where: { userId },
+      where: {
+        userId,
+        NOT: { service: { name: { startsWith: "חסום" } } },
+      },
       include: {
         provider: true,
         service: true,

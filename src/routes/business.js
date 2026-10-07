@@ -2,7 +2,10 @@ const express = require("express");
 const router = express.Router();
 const businessController = require("../controllers/business");
 const { authenticateToken, requireAdmin } = require("../middleware/auth");
-const { resolveBusinessBySlug, resolveOwnedBusiness } = require("../middleware/tenant");
+const {
+  resolveBusinessBySlug,
+  resolveOwnedBusiness,
+} = require("../middleware/tenant");
 
 // שליפת שירותים/ספרים של העסק שלי (מזוהה מהטוקן) - לשימוש פנימי בפאנל הניהול.
 // מוגדר *לפני* בלוק ה-:slug למטה בכוונה: "/:slug/services" הוא תבנית שתופסת כל
@@ -54,13 +57,49 @@ router.get(
   resolveOwnedBusiness,
   businessController.getPublicProfile,
 );
+// שוק ההחלפות של העסק שלי - תצוגת מנהל: כל ההצעות הפעילות, בלי החרגה לפי
+// המשתמש המחובר (בניגוד ל-GET /appointments/swaps/available שמיועד ללקוח
+// שבודק אילו הצעות *של אחרים* הוא יכול להחליף אליהן, ולכן מחריג את עצמו)
+router.get(
+  "/my/swaps",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.getBusinessSwapOffers,
+);
+// פרסום תורים שבועי (ראשון-שבת)
+router.get(
+  "/my/week-status",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.getWeekPublishStatus,
+);
+router.post(
+  "/my/publish-week",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.publishWeek,
+);
+router.post(
+  "/my/unpublish-week",
+  authenticateToken,
+  requireAdmin,
+  resolveOwnedBusiness,
+  businessController.unpublishLastWeek,
+);
 
 // ==========================================
 // 0.5 הרשמת עסקים חדשים (שלב 6) - נתיבים ליטרליים,
 // חייבים להירשם לפני בלוק ה-":slug" למטה מאותה סיבה בדיוק כמו "/my/..."
 // ==========================================
 router.get("/check-slug", businessController.checkSlugAvailability);
-router.post("/register", authenticateToken, businessController.registerBusiness);
+router.post(
+  "/register",
+  authenticateToken,
+  businessController.registerBusiness,
+);
 
 // ==========================================
 // 0. פרוסה מינימלית אנכית - מולטי-טננט (שלב 2)
@@ -73,7 +112,7 @@ router.get(
   businessController.getPublicProfile,
 );
 
-// קטלוג שירותים וספרים מבודד לפי slug
+// שליפת שירותים/ספרים לפי slug - הנתיב הראשון שבודק שבידוד לפי עסק עובד קצה-לקצה
 router.get(
   "/:slug/services",
   resolveBusinessBySlug,
@@ -83,6 +122,24 @@ router.get(
   "/:slug/providers",
   resolveBusinessBySlug,
   businessController.getBusinessProviders,
+);
+// ביקורות: קריאה פתוחה לכולם, כתיבה דורשת משתמש מחובר (לקוח כלשהו)
+router.get(
+  "/:slug/reviews",
+  resolveBusinessBySlug,
+  businessController.getBusinessReviews,
+);
+router.post(
+  "/:slug/reviews",
+  resolveBusinessBySlug,
+  authenticateToken,
+  businessController.createReview,
+);
+router.delete(
+  "/:slug/reviews/:id",
+  resolveBusinessBySlug,
+  authenticateToken,
+  businessController.deleteReview,
 );
 router.get(
   "/:slug/appointments",
