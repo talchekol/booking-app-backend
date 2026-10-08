@@ -27,6 +27,31 @@ const registerFailedAttempt = (phone) => {
   }
 };
 
+// הגבלת קצב על שליחת SMS עצמה (למניעת הצפת מספר טלפון בבקשות קוד) -
+// נשמר בזיכרון בלבד, כמו verifyAttempts למעלה
+const sendAttempts = new Map();
+const MAX_SEND_ATTEMPTS = 3;
+const SEND_WINDOW_MS = 10 * 60 * 1000; // 10 דקות
+
+const isSendRateLimited = (phone) => {
+  const entry = sendAttempts.get(phone);
+  if (!entry) return false;
+  if (Date.now() - entry.windowStart > SEND_WINDOW_MS) {
+    sendAttempts.delete(phone);
+    return false;
+  }
+  return entry.count >= MAX_SEND_ATTEMPTS;
+};
+
+const registerSendAttempt = (phone) => {
+  const entry = sendAttempts.get(phone);
+  if (!entry || Date.now() - entry.windowStart > SEND_WINDOW_MS) {
+    sendAttempts.set(phone, { count: 1, windowStart: Date.now() });
+  } else {
+    entry.count += 1;
+  }
+};
+
 // 1. שליחת קוד אימות ב-SMS (OTP)
 const sendSms = async (req, res) => {
   try {
@@ -35,6 +60,13 @@ const sendSms = async (req, res) => {
     if (!phone) {
       return res.status(400).json({ error: "מספר טלפון הוא שדה חובה" });
     }
+
+    if (isSendRateLimited(phone)) {
+      return res.status(429).json({
+        error: "יותר מדי בקשות לקוד אימות. יש לנסות שוב בעוד כמה דקות.",
+      });
+    }
+    registerSendAttempt(phone);
 
     // איפוס מונה הניסיונות השגויים בכל בקשה לקוד חדש
     verifyAttempts.delete(phone);

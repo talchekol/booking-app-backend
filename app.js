@@ -15,7 +15,11 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middlewares
-app.use(cors());
+// CORS: אם FRONTEND_URL מוגדר (כתובת ה-Vercel האמיתית בפרודקשן) - מגבילים
+// אליו בלבד; אם לא מוגדר (פיתוח מקומי, או עדיין לפני שהפרונט פורס) - נשאר
+// פתוח לגמרי, בדיוק כמו שהיה עד עכשיו, כדי לא לשבור כלום באמצע הדרך
+const allowedOrigin = process.env.FRONTEND_URL;
+app.use(cors(allowedOrigin ? { origin: allowedOrigin } : {}));
 app.use(express.json());
 
 // נתיב בדיקה ראשי
