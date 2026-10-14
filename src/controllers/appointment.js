@@ -110,13 +110,18 @@ const createAppointment = async (req, res) => {
 const getMyAppointments = async (req, res) => {
   try {
     const userId = req.user.userId || req.user.id;
+    const { businessId } = req.query;
 
     // מחריגים רשומות "חסום: ..." - אלה placeholder-ים פנימיים של חסימת
     // משבצות (ראו blockTimeRange ב-business.js), לא תורים אמיתיים - אם
-    // המשתמש הזה גם בעל עסק, הן מוצמדות ל-userId שלו ולא אמורות להופיע כאן
+    // המשתמש הזה גם בעל עסק, הן מוצמדות ל-userId שלו ולא אמורות להופיע כאן.
+    // businessId אופציונלי: ClientApp (תחת /:slug) מעביר אותו כדי לקבל רק את
+    // התור של העסק הנוכחי - בלי זה, תור קרוב יותר אצל עסק אחר "דוחק" ומחליף
+    // בתצוגה את התור של העסק שבו נמצא המשתמש כרגע
     const appointments = await prisma.appointment.findMany({
       where: {
         userId,
+        ...(businessId && { businessId }),
         NOT: { service: { name: { startsWith: "חסום" } } },
       },
       include: {
