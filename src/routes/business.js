@@ -169,9 +169,6 @@ router.get(
 // פרופיל ופרטי העסק (שם, כתובת, טלפון, סושיאל)
 router.get("/profile", businessController.getBusinessProfile);
 
-router.get("/services", businessController.getServices);
-router.get("/providers", businessController.getProviders);
-
 // בדיקת תפוסה וזמינות עבור הלקוח (ללא צורך בהרשאות מנהל)
 router.get("/appointments", businessController.getBusinessAppointments);
 router.get("/blocked-days", businessController.getBlockedDays);

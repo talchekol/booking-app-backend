@@ -465,18 +465,6 @@ exports.getBlockedDays = async (req, res) => {
 // 2. ניהול שירותים (Services)
 // ==========================================
 
-exports.getServices = async (req, res) => {
-  try {
-    const services = await prisma.service.findMany({
-      orderBy: { price: "asc" },
-    });
-    res.json(services);
-  } catch (error) {
-    console.error("Error fetching services:", error);
-    res.status(500).json({ error: "שגיאה בשליפת שירותים" });
-  }
-};
-
 exports.createService = async (req, res) => {
   try {
     const { name, price, durationMin } = req.body;
@@ -556,28 +544,19 @@ exports.deleteService = async (req, res) => {
 // 3. ניהול ספרים וצוות (Providers)
 // ==========================================
 
-exports.getProviders = async (req, res) => {
-  try {
-    const providers = await prisma.provider.findMany();
-    res.json(providers);
-  } catch (error) {
-    console.error("Error fetching providers:", error);
-    res.status(500).json({ error: "שגיאה בשליפת ספרים" });
-  }
-};
-
 exports.createProvider = async (req, res) => {
   try {
-    const { name, imageUrl } = req.body;
+    const { name, imageUrl, description } = req.body;
 
     if (!name) {
-      return res.status(400).json({ error: "שם הספר הוא שדה חובה" });
+      return res.status(400).json({ error: "שם איש הצוות הוא שדה חובה" });
     }
 
     const provider = await prisma.provider.create({
       data: {
         name,
         imageUrl: imageUrl || null,
+        description: description || null,
         businessId: req.business.id,
       },
     });

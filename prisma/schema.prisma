@@ -73,10 +73,11 @@ model Business {
 
 // 4. מעניקי השירות / אנשי צוות (ספר, מעצבת)
 model Provider {
-  id         String   @id @default(uuid())
-  name       String
-  imageUrl   String?
-  businessId String
+  id          String   @id @default(uuid())
+  name        String
+  imageUrl    String?
+  description String?
+  businessId  String
   business   Business @relation(fields: [businessId], references: [id])
 
   appointments Appointment[]
