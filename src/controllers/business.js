@@ -950,17 +950,19 @@ exports.getBlockedDaysBySlug = async (req, res) => {
   }
 };
 
-// שליפת הודעת שידור פעילה לעסק שאותר לפי slug
+// שליפת כל הודעות השידור הפעילות לעסק שאותר לפי slug - מחזיר רשימה (לא רק
+// את האחרונה), כדי שהודעה חדשה תתווסף ללקוח ולא "תחליף" הודעות קודמות
+// שעדיין רלוונטיות. הכי חדשה ראשונה
 exports.getActiveBroadcastBySlug = async (req, res) => {
   try {
-    const broadcast = await prisma.broadcast.findFirst({
+    const broadcasts = await prisma.broadcast.findMany({
       where: { businessId: req.business.id, isActive: true },
       orderBy: { createdAt: "desc" },
     });
-    res.json(broadcast || null);
+    res.json(broadcasts);
   } catch (error) {
-    console.error("Error fetching active broadcast by slug:", error);
-    res.status(500).json({ error: "שגיאה בשליפת הודעת מערכת" });
+    console.error("Error fetching active broadcasts by slug:", error);
+    res.status(500).json({ error: "שגיאה בשליפת הודעות מערכת" });
   }
 };
 

@@ -136,9 +136,13 @@ const getMyAppointments = async (req, res) => {
     const upcoming = appointments.find(
       (app) => new Date(app.dateTime) >= now && app.status !== "CANCELLED",
     );
-    const history = appointments.filter(
-      (app) => new Date(app.dateTime) < now || app.status === "CANCELLED",
-    );
+    // appointments ממוין עולה (asc) כדי ש-upcoming.find() ימצא נכון את התור
+    // הקרוב ביותר - אבל בהיסטוריה רוצים את הכי חדש קודם, ולכן הופכים את הסדר
+    const history = appointments
+      .filter(
+        (app) => new Date(app.dateTime) < now || app.status === "CANCELLED",
+      )
+      .reverse();
 
     res.status(200).json({
       upcoming: upcoming || null,
