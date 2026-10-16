@@ -158,7 +158,45 @@ const verifySms = async (req, res) => {
   }
 };
 
+// 3. חידוש טוקן (sliding session) - נקרא בשקט מהפרונט בכל פעם שהאפליקציה
+// נפתחת/חוזרת לפוקוס, כדי שמשתמש פעיל לעולם לא יראה מסך login מחדש, בעוד
+// שמכשיר שאבד/ננטש ולא נעשה בו שימוש עדיין "ננעל" אחרי 30 יום כרגיל.
+// שולפים את ה-role מה-DB מחדש (לא רק מעתיקים מהטוקן הישן) כדי ששינוי הרשאה
+// (לדוגמה מנהל שהפסיק להיות ADMIN) ייכנס לתוקף כבר בחידוש הקרוב, לא רק
+// כשהטוקן הישן יפוג
+const refreshToken = async (req, res) => {
+  try {
+    const userId = req.user.userId || req.user.id;
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      return res.status(404).json({ error: "משתמש לא נמצא" });
+    }
+
+    const token = jwt.sign(
+      { userId: user.id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "30d" },
+    );
+
+    res.status(200).json({
+      token,
+      user: {
+        id: user.id,
+        phone: user.phone,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error("Error refreshing token:", error);
+    res.status(500).json({ error: "שגיאה בחידוש ההתחברות" });
+  }
+};
+
 module.exports = {
   sendSms,
   verifySms,
+  refreshToken,
 };
