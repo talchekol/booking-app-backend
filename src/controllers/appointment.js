@@ -10,12 +10,9 @@ const createAppointment = async (req, res) => {
       return res.status(400).json({ error: "כל הפרטים הם חובה לקביעת תור" });
     }
 
+    // בדיקה אם התאריך הוא תאריך עתידי
     const parsedDateTime = new Date(dateTime);
 
-    // אכיפת פרסום שבועי בצד השרת - זה היה קיים רק כבדיקה בצד הלקוח
-    // (SelectDateTime.jsx), כלומר ניתן היה לעקוף אותה לגמרי בקריאת API ישירה.
-    // בלי בדיקה כאן, "פרסום תורים שבועי" הוא רק אילוץ קוסמטי ב-UI ולא אכיפה
-    // אמיתית - כל תאריך היה ניתן להזמנה גם אם בעל העסק מעולם לא פרסם אותו.
     const business = await prisma.business.findUnique({
       where: { id: businessId },
       select: { bookingOpenUntil: true },
@@ -34,10 +31,7 @@ const createAppointment = async (req, res) => {
       });
     }
 
-    // בדיקה שלמשתמש אין כבר תור עתידי פעיל - ברמת העסק הזה בלבד, כי משתמש
-    // יכול להזמין אצל כמה עסקים שונים במקביל. מחריגים רשומות "חסום: ..." -
-    // אלה placeholder-ים פנימיים לחסימת משבצות (blockTimeRange), לא תורים
-    // אמיתיים של המשתמש, גם אם userId עליהם שייך לבעל העסק עצמו (ראו getMyAppointments)
+    // בדיקה אם למשתמש כבר יש תור עתידי קבוע (CONFIRMED) אצל העסק הזה
     const existingUpcoming = await prisma.appointment.findFirst({
       where: {
         userId,
@@ -112,12 +106,7 @@ const getMyAppointments = async (req, res) => {
     const userId = req.user.userId || req.user.id;
     const { businessId } = req.query;
 
-    // מחריגים רשומות "חסום: ..." - אלה placeholder-ים פנימיים של חסימת
-    // משבצות (ראו blockTimeRange ב-business.js), לא תורים אמיתיים - אם
-    // המשתמש הזה גם בעל עסק, הן מוצמדות ל-userId שלו ולא אמורות להופיע כאן.
-    // businessId אופציונלי: ClientApp (תחת /:slug) מעביר אותו כדי לקבל רק את
-    // התור של העסק הנוכחי - בלי זה, תור קרוב יותר אצל עסק אחר "דוחק" ומחליף
-    // בתצוגה את התור של העסק שבו נמצא המשתמש כרגע
+    // 1. שליפת כל התורים של המשתמש (לפי עסק אם נבחר) - כולל תורים עתידיים והיסטוריה
     const appointments = await prisma.appointment.findMany({
       where: {
         userId,

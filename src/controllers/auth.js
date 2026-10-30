@@ -56,6 +56,7 @@ const registerSendAttempt = (phone) => {
 const sendSms = async (req, res) => {
   try {
     const { phone } = req.body;
+    console.log(`📩 POST /auth/send-sms - התקבלה בקשה עבור ${phone}`);
 
     if (!phone) {
       return res.status(400).json({ error: "מספר טלפון הוא שדה חובה" });
@@ -74,6 +75,7 @@ const sendSms = async (req, res) => {
     // שולח SMS אמיתי דרך Twilio Verify אם מוגדר ב-.env, אחרת נופל חזרה
     // לסימולציה (קוד מודפס לטרמינל) - ראו src/config/sms.js
     await sendVerificationCode(phone);
+    console.log(`✅ קוד אימות נשלח בהצלחה ל-${phone}`);
 
     res.status(200).json({ message: "קוד אימות נשלח בהצלחה" });
   } catch (error) {

@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 
+// מידלוור שמאמת את הטוקן JWT שנשלח בבקשה ומוסיף את פרטי המשתמש ל-request
 const authenticateToken = (req, res, next) => {
   // שליפת הטוקן מה-Header של הבקשה (Authorization: Bearer TOKEN)
   const authHeader = req.headers["authorization"];

@@ -26,6 +26,22 @@ if (hasTwilioConfig) {
   console.log("📨 SMS: מצב סימולציה (אין מפתחות Twilio ב-.env) - קוד יודפס לטרמינל");
 }
 
+// עוטף הבטחה (promise) בטיימאאוט - כדי שקריאה תקועה ל-Twilio (רשת תקולה,
+// תקלה זמנית אצלם וכו') תיכשל אחרי X שניות עם שגיאה ברורה, במקום להישאר
+// תלויה לנצח ולהשאיר גם את הלקוח וגם אותנו בלי שום אינדיקציה למה שקרה
+const withTimeout = (promise, ms, label) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`Timeout: ${label} לא הגיב תוך ${ms / 1000} שניות`)),
+        ms,
+      ),
+    ),
+  ]);
+
+const TWILIO_TIMEOUT_MS = 15000;
+
 // ממיר מספר טלפון ישראלי מקומי (0501234567) לפורמט E.164 שטוויליו דורש (+972501234567)
 const toE164 = (localPhone) => {
   const digits = localPhone.replace(/\D/g, "");
@@ -38,9 +54,13 @@ const toE164 = (localPhone) => {
 // מנהל את הכול בעצמם, אין צורך לשמור שום דבר אצלנו.
 const sendVerificationCode = async (phone) => {
   if (hasTwilioConfig) {
-    await twilioClient.verify.v2
-      .services(process.env.TWILIO_VERIFY_SERVICE_SID)
-      .verifications.create({ to: toE164(phone), channel: "sms" });
+    await withTimeout(
+      twilioClient.verify.v2
+        .services(process.env.TWILIO_VERIFY_SERVICE_SID)
+        .verifications.create({ to: toE164(phone), channel: "sms" }),
+      TWILIO_TIMEOUT_MS,
+      "Twilio verifications.create",
+    );
     return { simulated: false };
   }
 
@@ -57,9 +77,13 @@ const sendVerificationCode = async (phone) => {
 // בדיקת קוד אימות - מחזיר boolean (האם הקוד נכון ותקף)
 const checkVerificationCode = async (phone, code) => {
   if (hasTwilioConfig) {
-    const result = await twilioClient.verify.v2
-      .services(process.env.TWILIO_VERIFY_SERVICE_SID)
-      .verificationChecks.create({ to: toE164(phone), code });
+    const result = await withTimeout(
+      twilioClient.verify.v2
+        .services(process.env.TWILIO_VERIFY_SERVICE_SID)
+        .verificationChecks.create({ to: toE164(phone), code }),
+      TWILIO_TIMEOUT_MS,
+      "Twilio verificationChecks.create",
+    );
     return result.status === "approved";
   }
 

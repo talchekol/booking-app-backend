@@ -1,5 +1,9 @@
 const express = require("express");
+
+// CORS: Cross-Origin Resource Sharing - מאפשר לשרת שלנו לקבל בקשות מכתובות אחרות (למשל מה-frontend שלנו ב-Vercel)
 const cors = require("cors");
+
+// dotenv: מאפשר לנו לטעון משתני סביבה מקובץ .env
 require("dotenv").config();
 
 if (!process.env.JWT_SECRET) {

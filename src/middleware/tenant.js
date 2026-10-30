@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 
+// מידלוור שמזהה את העסק לפי ה-slug ב-URL (למשל /business/:slug/appointments) ומוסיף אותו ל-request
 async function resolveBusinessBySlug(req, res, next) {
   try {
     const { slug } = req.params;
@@ -24,10 +25,7 @@ async function resolveBusinessBySlug(req, res, next) {
   }
 }
 
-// מידלוור מנהלי: מזהה את העסק השייך למשתמש המאומת (רץ אחרי authenticateToken+requireAdmin)
-// בכוונה לא משתמש ב-getTargetBusinessId מ-controllers/business.js, כי אותה פונקציה כוללת
-// גם fallback גלובלי ("אין עסק? קח את הראשון בכל ה-DB") שאסור שיחול בנתיבי ניהול - אם למנהל
-// אין עסק בבעלותו, זה חייב להיכשל עם 404, לא "לנהל" בטעות עסק זר
+// מידלוור שמזהה את העסק בבעלות המשתמש המחובר ומוסיף אותו ל-request
 const resolveOwnedBusiness = async (req, res, next) => {
   try {
     // ה-JWT (src/controllers/auth.js) חותם payload עם userId בלבד - אין req.user.id
